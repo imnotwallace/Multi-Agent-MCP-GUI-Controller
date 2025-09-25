@@ -29,6 +29,12 @@ try:
     import websockets
 except Exception:
     websockets = None
+import socket
+import os
+import urllib.request
+import urllib.error
+import uvicorn
+from mcp_server import app as mcp_app
 
 
 class ServerSubscriber:
@@ -321,6 +327,59 @@ class UnifiedDialog:
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+def _is_port_responding(port: int, timeout: float = 0.5) -> bool:
+    """Return True if an HTTP health endpoint responds on the given port."""
+    try:
+        url = f"http://127.0.0.1:{port}/healthz"
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def _is_port_free(port: int, host: str = '127.0.0.1') -> bool:
+    """Try to bind to the port to check whether it's free. Returns True if free."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind((host, port))
+        s.listen(1)
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+def _start_uvicorn_in_thread(port: int) -> threading.Thread:
+    """Start uvicorn programmatically in a daemon thread and return the thread object.
+
+    The server instance is attached to `mcp_app.state._uvicorn_server` so shutdown endpoint can set should_exit.
+    """
+    def _run():
+        try:
+            config = uvicorn.Config(app=mcp_app, host="127.0.0.1", port=port, log_level="info")
+            server = uvicorn.Server(config)
+            # expose server on app state
+            try:
+                mcp_app.state._uvicorn_server = server
+            except Exception:
+                logger.exception("Failed to attach server instance to app.state")
+
+            logger.info(f"Starting programmatic uvicorn server on port {port}")
+            asyncio.run(server.serve())
+            logger.info("Programmatic uvicorn server exited")
+        except Exception:
+            logger.exception("Programmatic uvicorn thread failed")
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return thread
 
 def async_operation(func):
     """Decorator to run operations in background thread"""
@@ -653,11 +712,19 @@ class PerformantMCPView:
         self.root.title("Multi-Agent MCP Context Manager (Performance Enhanced)")
         self.root.geometry("1200x800")
 
+        # Ensure MCP server is running (auto-launch if needed) and pick a port
+        self.server_port = None
+        try:
+            self.ensure_server_running()
+        except Exception:
+            logger.exception("Failed to ensure server running; continuing without server")
+
         # Start a background subscriber to server broadcasts (if websockets available)
         self.server_subscriber = None
-        if websockets is not None:
+        if websockets is not None and self.server_port is not None:
             try:
-                self.server_subscriber = ServerSubscriber(self)
+                ws_uri = f"ws://127.0.0.1:{self.server_port}/ws/gui_subscriber"
+                self.server_subscriber = ServerSubscriber(self, uri=ws_uri)
                 self.server_subscriber.start()
             except Exception:
                 logger.exception("Failed to start server subscriber")
@@ -672,6 +739,42 @@ class PerformantMCPView:
         self.load_team_data()
         # Ensure graceful shutdown when window closed
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def ensure_server_running(self, start_port: int = 8765, max_tries: int = 50, wait_seconds: float = 5.0):
+        """Ensure MCP server is running. If not found, try to start it on start_port and increment until available.
+
+        This will set self.server_port to the discovered port, or leave it None if no server could be started.
+        """
+        port = start_port
+        for attempt in range(max_tries):
+            try_port = start_port + attempt
+            # If a running server responds, adopt that port
+            try:
+                if _is_port_responding(try_port):
+                    self.server_port = try_port
+                    logger.info(f"Found running MCP server on port {try_port}")
+                    return
+            except Exception:
+                pass
+
+            # If port appears free, attempt to start programmatic server there
+            try:
+                if _is_port_free(try_port):
+                    logger.info(f"Attempting to programmatically start MCP server on port {try_port}")
+                    _start_uvicorn_in_thread(try_port)
+                    # Wait for server to come up
+                    deadline = time.time() + wait_seconds
+                    while time.time() < deadline:
+                        if _is_port_responding(try_port):
+                            self.server_port = try_port
+                            logger.info(f"Programmatic MCP server started on port {try_port}")
+                            return
+                        time.sleep(0.1)
+                    logger.warning(f"Server did not respond on port {try_port} after start attempt")
+            except Exception:
+                logger.exception(f"Failed attempting to start server on port {try_port}")
+
+        logger.warning("Could not find or start MCP server on ports %s-%s", start_port, start_port + max_tries - 1)
 
     def setup_ui(self):
         """Setup enhanced UI"""
@@ -928,7 +1031,8 @@ class PerformantMCPView:
         import urllib.error
         import os
 
-        url = "http://127.0.0.1:8765/shutdown"
+        port = getattr(self, 'server_port', 8765)
+        url = f"http://127.0.0.1:{port}/shutdown"
         # Confirm with the user before sending shutdown
         if not messagebox.askyesno("Confirm Shutdown", "Shut down the local MCP server? This will flush pending writes.", parent=self.root):
             return
