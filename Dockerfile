@@ -1,5 +1,7 @@
 # Use official Python base image (Linux, for best compatibility)
-FROM python:3.11-slim
+
+# Use official Windows Python image
+FROM mcr.microsoft.com/windows/python:3.11
 
 # Set working directory
 WORKDIR /app
