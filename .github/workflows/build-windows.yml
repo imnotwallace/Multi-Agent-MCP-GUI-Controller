@@ -1,0 +1,41 @@
+name: Build Windows .exe
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - main
+
+jobs:
+  build-windows-exe:
+    name: Build Windows EXE
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if (Test-Path requirements.txt) { pip install -r requirements.txt } else { pip install pyinstaller }
+
+      - name: Install PyInstaller
+        run: |
+          pip install pyinstaller==5.13.0
+
+      - name: Build EXE (PyInstaller)
+        # Use the helper script to centralize build options and any tweaks
+        run: |
+          powershell -ExecutionPolicy Bypass -File .\scripts\ci_build_windows.ps1
+
+      - name: Upload built dist folder
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-windows-dist
+          path: dist
