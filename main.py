@@ -16,6 +16,116 @@ from contextlib import contextmanager
 from functools import wraps
 from cachetools import TTLCache
 
+class SelectionDialog:
+    """Dialog for selecting options without name/description requirements"""
+    def __init__(self, parent, title, message, fields):
+        self.result = None
+        self.parent = parent
+
+        # Create dialog window
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title(title)
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        self.setup_ui(message, fields)
+
+        # Center the dialog after setup
+        self.center_dialog()
+
+    def setup_ui(self, message, fields):
+        """Setup dialog UI for selections"""
+        main_frame = ttk.Frame(self.dialog, padding="20")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Message with text wrapping
+        if message:
+            message_label = tk.Label(main_frame, text=message, wraplength=360, justify=tk.LEFT, font=('TkDefaultFont', 10))
+            message_label.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 15))
+
+        # Fields
+        self.field_widgets = {}
+        row = 1
+        for field_name, field_config in fields.items():
+            ttk.Label(main_frame, text=field_config['label']).grid(row=row, column=0, sticky=tk.W, pady=5, padx=(0, 10))
+
+            if field_config['type'] == 'combobox':
+                widget = ttk.Combobox(main_frame, width=30, state="readonly",
+                                    values=field_config.get('values', []))
+                if field_config.get('default'):
+                    widget.set(field_config['default'])
+            else:
+                widget = ttk.Entry(main_frame, width=30)
+
+            widget.grid(row=row, column=1, columnspan=2, sticky=tk.EW, pady=5)
+            self.field_widgets[field_name] = widget
+            row += 1
+
+        # Button frame
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=row, column=0, columnspan=3, pady=(20, 0))
+
+        ttk.Button(button_frame, text="Confirm", command=self.on_confirm).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(button_frame, text="Cancel", command=self.on_cancel).pack(side=tk.LEFT)
+
+        # Configure column weights
+        main_frame.columnconfigure(1, weight=1)
+
+        # Bind keys
+        self.dialog.bind('<Return>', lambda e: self.on_confirm())
+        self.dialog.bind('<Escape>', lambda e: self.on_cancel())
+
+        # Focus first field
+        if self.field_widgets:
+            first_widget = next(iter(self.field_widgets.values()))
+            first_widget.focus()
+
+    def center_dialog(self):
+        """Center dialog on screen after measuring content"""
+        self.dialog.update_idletasks()
+        width = self.dialog.winfo_reqwidth()
+        height = self.dialog.winfo_reqheight()
+
+        # Ensure minimum size but allow dynamic sizing
+        width = max(450, width)
+        height = max(200, height)
+
+        x = (self.dialog.winfo_screenwidth() // 2) - (width // 2)
+        y = (self.dialog.winfo_screenheight() // 2) - (height // 2)
+        self.dialog.geometry(f"{width}x{height}+{x}+{y}")
+
+    def on_confirm(self):
+        """Handle confirm button"""
+        # Get field values
+        field_values = {}
+        for field_name, widget in self.field_widgets.items():
+            value = widget.get().strip()
+            field_values[field_name] = value
+
+        # Validate that required fields have values
+        missing_fields = []
+        for field_name, widget in self.field_widgets.items():
+            if not widget.get().strip():
+                missing_fields.append(field_name)
+
+        if missing_fields:
+            messagebox.showwarning("Warning", f"Please select: {', '.join(missing_fields)}", parent=self.dialog)
+            return
+
+        self.result = field_values
+        self.dialog.destroy()
+
+    def on_cancel(self):
+        """Handle cancel button"""
+        self.result = None
+        self.dialog.destroy()
+
+    def show(self):
+        """Show dialog and return result"""
+        self.dialog.wait_window()
+        return self.result
+
+
 class UnifiedDialog:
     """Unified dialog for creating entities with name and description"""
     def __init__(self, parent, title, name_label="Name:", description_label="Description (optional):",
@@ -234,6 +344,7 @@ class CachedMCPDataModel:
                 session_id TEXT,
                 description TEXT,
                 created_at TIMESTAMP,
+                updated_at TIMESTAMP,
                 deleted_at TIMESTAMP,
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             )''')
@@ -246,6 +357,7 @@ class CachedMCPDataModel:
                 team_id TEXT,
                 status TEXT DEFAULT 'disconnected',
                 last_active TIMESTAMP,
+                updated_at TIMESTAMP,
                 deleted_at TIMESTAMP,
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL,
                 FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE SET NULL
@@ -987,12 +1099,11 @@ class PerformantMCPView:
             session_options.append(f"[{project_name}] {session['name']}")
 
         # Create dialog
-        dialog = UnifiedDialog(
+        dialog = SelectionDialog(
             self.root,
             "Assign Team to Session",
-            "Select Team:",
-            "This will disconnect selected agents from other sessions and assign all team agents to the selected session.",
-            extra_fields={
+            "This will disconnect other agents from the target session and assign all agents from the selected team to it.",
+            {
                 'team': {
                     'label': 'Team:',
                     'type': 'combobox',
