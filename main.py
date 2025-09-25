@@ -15,6 +15,91 @@ from typing import Dict, List, Optional, Tuple
 from contextlib import contextmanager
 from functools import wraps
 from cachetools import TTLCache
+import asyncio
+import threading
+import json
+import time
+import base64
+try:
+    import keyring
+except Exception:
+    keyring = None
+import pathlib
+try:
+    import websockets
+except Exception:
+    websockets = None
+
+
+class ServerSubscriber:
+    """Background WebSocket subscriber that connects to the MCP server and listens for broadcasts.
+
+    It runs an asyncio loop in a dedicated thread and schedules GUI-safe callbacks via the view's
+    `root.after` method on agent_status events.
+    """
+    def __init__(self, view, uri: str = "ws://127.0.0.1:8765/ws/gui_subscriber"):
+        self.view = view
+        self.uri = uri
+        self._thread = None
+        self._stop_event = threading.Event()
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        # Attempt to cancel the websocket connection by connecting a short-lived client
+        # The worker loop checks _stop_event and will exit.
+        if self._thread:
+            self._thread.join(timeout=2.0)
+
+    def _run_loop(self):
+        try:
+            asyncio.run(self._main())
+        except Exception:
+            logger.exception("ServerSubscriber loop failed")
+
+    async def _main(self):
+        if websockets is None:
+            logger.warning("websockets not available; ServerSubscriber disabled")
+            return
+
+        try:
+            async with websockets.connect(self.uri) as ws:
+                logger.info(f"ServerSubscriber connected to {self.uri}")
+                while not self._stop_event.is_set():
+                    try:
+                        text = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    except Exception:
+                        break
+
+                    try:
+                        msg = json.loads(text)
+                    except Exception:
+                        continue
+
+                    # React to agent_status events
+                    if isinstance(msg, dict) and msg.get("type") == "agent_status":
+                        agent_id = msg.get("agent_id")
+                        status = msg.get("status")
+                        logger.info(f"Received agent_status: {agent_id}={status}")
+                        # Schedule cache clear on the GUI thread via view.root.after
+                        try:
+                            root = getattr(self.view, 'root', None)
+                            if root is not None and hasattr(root, 'after') and root.winfo_exists():
+                                root.after(0, self.view.model.clear_cache)
+                            else:
+                                # Fallback: call clear_cache directly
+                                self.view.model.clear_cache()
+                        except Exception:
+                            logger.exception("Failed handling agent_status")
+        except Exception as e:
+            logger.exception(f"ServerSubscriber connection failed: {e}")
 
 class SelectionDialog:
     """Dialog for selecting options without name/description requirements"""
@@ -562,9 +647,20 @@ class PerformantMCPView:
     """Performance-enhanced view with lazy loading and async operations"""
     def __init__(self, model: CachedMCPDataModel):
         self.model = model
+        # Config file path
+        self.config_path = pathlib.Path.home() / ".mcp_config.json"
         self.root = tk.Tk()
         self.root.title("Multi-Agent MCP Context Manager (Performance Enhanced)")
         self.root.geometry("1200x800")
+
+        # Start a background subscriber to server broadcasts (if websockets available)
+        self.server_subscriber = None
+        if websockets is not None:
+            try:
+                self.server_subscriber = ServerSubscriber(self)
+                self.server_subscriber.start()
+            except Exception:
+                logger.exception("Failed to start server subscriber")
 
         # Data refresh flag
         self.refresh_pending = False
@@ -574,6 +670,8 @@ class PerformantMCPView:
         self.schedule_refresh()
         self.load_agent_data()
         self.load_team_data()
+        # Ensure graceful shutdown when window closed
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def setup_ui(self):
         """Setup enhanced UI"""
@@ -774,6 +872,8 @@ class PerformantMCPView:
 
         # Refresh button
         ttk.Button(cache_frame, text="Refresh Stats", command=self.update_performance_stats).pack(pady=5)
+        # Shutdown server button (local only)
+        ttk.Button(cache_frame, text="Shutdown Server", command=self.shutdown_server).pack(pady=5)
 
         # Initial stats
         self.update_performance_stats()
@@ -821,6 +921,86 @@ class PerformantMCPView:
         except Exception as e:
             logger.error(f"Failed to create project: {e}")
             messagebox.showerror("Error", f"Failed to create project: {e}")
+
+    def shutdown_server(self):
+        """Request the local MCP server to shut down (development helper)."""
+        import urllib.request
+        import urllib.error
+        import os
+
+        url = "http://127.0.0.1:8765/shutdown"
+        # Confirm with the user before sending shutdown
+        if not messagebox.askyesno("Confirm Shutdown", "Shut down the local MCP server? This will flush pending writes.", parent=self.root):
+            return
+
+        headers = {}
+        # Silent token handling: prefer environment, then OS keyring, then local config file (base64).
+        token = os.environ.get('MCP_SHUTDOWN_TOKEN')
+        if not token:
+            try:
+                # Try OS keyring first (secure)
+                if keyring is not None:
+                    try:
+                        token = keyring.get_password('mcp', 'shutdown_token')
+                    except Exception:
+                        logger.exception("Keyring lookup failed; falling back to config file")
+
+                # If still not found, fallback to config file (legacy storage)
+                if not token and self.config_path.exists():
+                    cfg = json.loads(self.config_path.read_text())
+                    b64 = cfg.get('shutdown_token_b64')
+                    if b64:
+                        token = base64.b64decode(b64.encode('ascii')).decode('utf-8')
+
+                        # If keyring is available, silently migrate token into keyring and remove legacy entry
+                        if keyring is not None:
+                            try:
+                                keyring.set_password('mcp', 'shutdown_token', token)
+                                # Remove legacy entry
+                                cfg.pop('shutdown_token_b64', None)
+                                try:
+                                    self.config_path.write_text(json.dumps(cfg, indent=2))
+                                except Exception:
+                                    logger.exception("Failed to remove legacy token from config after migration")
+                            except Exception:
+                                logger.exception("Failed to migrate shutdown token into keyring")
+            except Exception:
+                logger.exception("Failed to read shutdown token from config/keyring; proceeding without token")
+
+        if token:
+            headers['Authorization'] = f"Bearer {token}"
+
+        # Create a modal progress dialog
+        progress_win = tk.Toplevel(self.root)
+        progress_win.title("Shutting down server")
+        progress_win.transient(self.root)
+        progress_win.grab_set()
+        ttk.Label(progress_win, text="Waiting for server to flush pending writes and stop...").pack(padx=20, pady=(10, 5))
+        pb = ttk.Progressbar(progress_win, mode='indeterminate')
+        pb.pack(fill=tk.X, padx=20, pady=(0, 10))
+        pb.start(10)
+
+        def do_shutdown():
+            try:
+                req = urllib.request.Request(url, method='POST', headers=headers)
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    body = resp.read().decode('utf-8')
+                # Show info and update status on GUI thread
+                self.root.after(0, lambda: messagebox.showinfo("Server Shutdown", f"Server response: {body}", parent=self.root))
+                self.root.after(0, lambda: self.status_var.set("Server stopped"))
+            except urllib.error.HTTPError as he:
+                self.root.after(0, lambda: messagebox.showerror("Error", f"Shutdown failed: {he.code} {he.reason}", parent=self.root))
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("Error", f"Failed to contact server: {e}", parent=self.root))
+            finally:
+                # Stop and destroy progress window on GUI thread
+                self.root.after(0, lambda: (pb.stop(), progress_win.destroy()))
+
+        # Note: we intentionally do not prompt the user to save or enter tokens.
+        # Token storage is handled silently via environment or config file.
+
+        thread = threading.Thread(target=do_shutdown, daemon=True)
+        thread.start()
 
     def new_session(self):
         """Create new session with unified dialog"""
@@ -2011,7 +2191,25 @@ class PerformantMCPView:
         except Exception as e:
             logger.error(f"Application error: {e}")
             messagebox.showerror("Error", f"Application error: {e}")
+        # Run the Tk main loop
+        try:
+            self.root.mainloop()
+        finally:
+            # Ensure subscriber stops when mainloop exits
+            if hasattr(self, 'server_subscriber') and self.server_subscriber:
+                self.server_subscriber.stop()
 
+    def on_close(self):
+        # Stop background subscriber then destroy window
+        if hasattr(self, 'server_subscriber') and self.server_subscriber:
+            try:
+                self.server_subscriber.stop()
+            except Exception:
+                logger.exception("Error stopping server subscriber")
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 def main():
     """Main entry point for performance-enhanced version"""
     try:
