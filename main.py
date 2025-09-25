@@ -30,7 +30,6 @@ try:
 except Exception:
     websockets = None
 import socket
-import ipaddress
 import os
 import urllib.request
 import urllib.error
@@ -334,71 +333,11 @@ def _is_port_responding(port: int, timeout: float = 0.5) -> bool:
     """Return True if an HTTP health endpoint responds on the given port."""
     try:
         # Default to loopback unless a host is provided via closure or binding
-        host = '127.0.0.1'
-        # If caller passed a host via closure style (rare), respect it; otherwise use loopback
-        # Note: some callers will be updated to pass a host explicitly.
-        url = f"http://{host}:{port}/healthz"
+        url = f"http://127.0.0.1:{port}/healthz"
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             return resp.status == 200
     except Exception:
         return False
-
-
-def detect_local_host() -> str:
-    """Detect a sensible local host/IP to bind to or contact.
-
-    Prefer a non-loopback IPv4 address resolved from the system hostname, else fall back to 127.0.0.1.
-    """
-    try:
-        hostname = socket.gethostname()
-        candidates = []
-        try:
-            for res in socket.getaddrinfo(hostname, None):
-                family, _, _, _, sockaddr = res
-                if family == socket.AF_INET6:
-                    ip = sockaddr[0]
-                    candidates.append((6, ip))
-                elif family == socket.AF_INET:
-                    ip = sockaddr[0]
-                    candidates.append((4, ip))
-        except Exception:
-            logger.debug("getaddrinfo failed in detect_local_host")
-
-        # Prefer non-loopback IPv6, then non-loopback IPv4
-        for fam, ip in candidates:
-            try:
-                if ip and not ipaddress.ip_address(ip).is_loopback:
-                    return ip
-            except Exception:
-                continue
-
-        try:
-            addr = socket.gethostbyname(hostname)
-            if addr and not addr.startswith("127."):
-                return addr
-        except Exception:
-            pass
-    except Exception:
-        logger.debug("Hostname resolution for detect_local_host failed")
-
-    return "127.0.0.1"
-
-
-def _format_host_for_url(host: str) -> str:
-    """Return host suitable for inclusion in URL authority portion.
-
-    IPv6 addresses must be wrapped in brackets like [::1]. If host already contains
-    brackets, return as-is.
-    """
-    if not host:
-        return host
-    if host.startswith('[') and host.endswith(']'):
-        return host
-    # If it looks like an IPv6 literal, wrap it
-    if ':' in host and not host.count(':') == 1:
-        # crude check: multiple ':' means IPv6 (not host:port)
-        return f'[{host}]'
-    return host
 
 
 def _is_port_free(port: int, host: str = '127.0.0.1') -> bool:
@@ -786,9 +725,7 @@ class PerformantMCPView:
         self.server_subscriber = None
         if websockets is not None and self.server_port is not None:
             try:
-                host = getattr(self, 'server_host', '127.0.0.1') or '127.0.0.1'
-                host_for_url = _format_host_for_url(host)
-                ws_uri = f"ws://{host_for_url}:{self.server_port}/ws/gui_subscriber"
+                ws_uri = f"ws://127.0.0.1:{self.server_port}/ws/gui_subscriber"
                 self.server_subscriber = ServerSubscriber(self, uri=ws_uri)
                 self.server_subscriber.start()
             except Exception:
@@ -811,9 +748,6 @@ class PerformantMCPView:
         This will set self.server_port to the discovered port, or leave it None if no server could be started.
         """
         port = start_port
-        # Detect a sensible host to bind to / contact
-        host = detect_local_host()
-        self.server_host = host
         for attempt in range(max_tries):
             try_port = start_port + attempt
             # If a running server responds, adopt that port
@@ -821,26 +755,21 @@ class PerformantMCPView:
                 if _is_port_responding(try_port):
                     self.server_port = try_port
                     logger.info(f"Found running MCP server on port {try_port}")
-                    # Show found server in status
-                    host_for_disp = _format_host_for_url(host)
-                    self._set_status(f"Server: {host_for_disp}:{self.server_port}")
                     return
             except Exception:
                 pass
 
             # If port appears free, attempt to start programmatic server there
             try:
-                if _is_port_free(try_port, host=host):
-                    logger.info(f"Attempting to programmatically start MCP server on {host}:{try_port}")
-                    _start_uvicorn_in_thread(try_port, host=host)
+                if _is_port_free(try_port):
+                    logger.info(f"Attempting to programmatically start MCP server on port {try_port}")
+                    _start_uvicorn_in_thread(try_port)
                     # Wait for server to come up
                     deadline = time.time() + wait_seconds
                     while time.time() < deadline:
                         if _is_port_responding(try_port):
                             self.server_port = try_port
                             logger.info(f"Programmatic MCP server started on port {try_port}")
-                            host_for_disp = _format_host_for_url(host)
-                            self._set_status(f"Server: {host_for_disp}:{self.server_port}")
                             return
                         time.sleep(0.1)
                     logger.warning(f"Server did not respond on port {try_port} after start attempt")
@@ -856,20 +785,6 @@ class PerformantMCPView:
         self.status_var.set("Ready")
         status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
-
-    def _set_status(self, text: str):
-        """Safely update the status_var from any thread/context."""
-        try:
-            if hasattr(self, 'root') and self.root and getattr(self.root, 'after', None):
-                self.root.after(0, lambda: self.status_var.set(text))
-            else:
-                # Fallback direct set
-                self.status_var.set(text)
-        except Exception:
-            try:
-                self.status_var.set(text)
-            except Exception:
-                logger.exception("Failed to set status")
 
         # Main content
         notebook = ttk.Notebook(self.root)
@@ -1301,43 +1216,40 @@ class PerformantMCPView:
             except Exception:
                 logger.exception("Failed to read shutdown token from config/keyring; proceeding without token")
 
-        if not token:
-            messagebox.showwarning("Warning", "No shutdown token found; cannot request remote shutdown", parent=self.root)
-            return
+        if token:
+            headers['Authorization'] = f"Bearer {token}"
 
-        # Ask the server to shutdown
-        try:
-            host = getattr(self, 'server_host', '127.0.0.1') or '127.0.0.1'
-            host_for_url = _format_host_for_url(host)
-            url = f"http://{host_for_url}:{port}/shutdown"
-            req = urllib.request.Request(url, method='POST')
-            req.add_header('X-Admin-Token', token)
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                messagebox.showinfo("Shutdown", f"Server responded: {resp.status}", parent=self.root)
-        except Exception as e:
-            logger.exception("Failed to request server shutdown")
-            messagebox.showerror("Error", f"Shutdown request failed: {e}", parent=self.root)
-            # If initial immediate request failed, perform a background retry with longer timeout
-            def do_shutdown():
-                try:
-                    # Try again with longer timeout; include the token header
-                    req2 = urllib.request.Request(url, method='POST')
-                    req2.add_header('X-Admin-Token', token)
-                    with urllib.request.urlopen(req2, timeout=60) as resp2:
-                        body = resp2.read().decode('utf-8')
-                    # Show info and update status on GUI thread
-                    self.root.after(0, lambda: messagebox.showinfo("Server Shutdown", f"Server response: {body}", parent=self.root))
-                    self.root.after(0, lambda: self._set_status("Server stopped"))
-                except urllib.error.HTTPError as he:
-                    self.root.after(0, lambda: messagebox.showerror("Error", f"Shutdown failed: {he.code} {he.reason}", parent=self.root))
-                except Exception as e2:
-                    self.root.after(0, lambda: messagebox.showerror("Error", f"Failed to contact server: {e2}", parent=self.root))
+        # Create a modal progress dialog
+        progress_win = tk.Toplevel(self.root)
+        progress_win.title("Shutting down server")
+        progress_win.transient(self.root)
+        progress_win.grab_set()
+        ttk.Label(progress_win, text="Waiting for server to flush pending writes and stop...").pack(padx=20, pady=(10, 5))
+        pb = ttk.Progressbar(progress_win, mode='indeterminate')
+        pb.pack(fill=tk.X, padx=20, pady=(0, 10))
+        pb.start(10)
 
-            # Note: we intentionally do not prompt the user to save or enter tokens.
-            # Token storage is handled silently via environment or config file.
+        def do_shutdown():
+            try:
+                req = urllib.request.Request(url, method='POST', headers=headers)
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    body = resp.read().decode('utf-8')
+                # Show info and update status on GUI thread
+                self.root.after(0, lambda: messagebox.showinfo("Server Shutdown", f"Server response: {body}", parent=self.root))
+                self.root.after(0, lambda: self.status_var.set("Server stopped"))
+            except urllib.error.HTTPError as he:
+                self.root.after(0, lambda: messagebox.showerror("Error", f"Shutdown failed: {he.code} {he.reason}", parent=self.root))
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("Error", f"Failed to contact server: {e}", parent=self.root))
+            finally:
+                # Stop and destroy progress window on GUI thread
+                self.root.after(0, lambda: (pb.stop(), progress_win.destroy()))
 
-            thread = threading.Thread(target=do_shutdown, daemon=True)
-            thread.start()
+        # Note: we intentionally do not prompt the user to save or enter tokens.
+        # Token storage is handled silently via environment or config file.
+
+        thread = threading.Thread(target=do_shutdown, daemon=True)
+        thread.start()
 
     def new_session(self):
         """Create new session with unified dialog"""
