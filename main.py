@@ -792,6 +792,8 @@ class PerformantMCPView:
         self.setup_agent_management(notebook)
         self.setup_team_management(notebook)
         self.setup_performance_monitor(notebook)
+    # Admin tab for allowlist management
+    self.setup_admin_tab(notebook)
 
     def setup_project_view(self, notebook):
         """Enhanced project view with lazy loading"""
@@ -922,6 +924,47 @@ class PerformantMCPView:
         individual_frame.pack(fill=tk.X, pady=2)
         ttk.Button(individual_frame, text="View Agent Contexts", command=self.view_agent_contexts_from_management).pack(side=tk.LEFT, padx=5)
 
+    def ensure_agent_allowlisted(self, agent_id: str):
+        """Ensure the given agent_id is present in the allowlist file and update running server allowlist if possible.
+
+        This function is silent and best-effort. It writes to MCP_AGENT_ALLOWLIST_FILE or ~/.mcp_allowlist.txt.
+        """
+        try:
+            path = os.environ.get('MCP_AGENT_ALLOWLIST_FILE') or os.path.expanduser('~/.mcp_allowlist.txt')
+            existing = set()
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r', encoding='utf-8') as fh:
+                        for ln in fh:
+                            ln = ln.strip()
+                            if ln and not ln.startswith('#'):
+                                existing.add(ln)
+                except Exception:
+                    logger.exception("Failed to read allowlist file for migration")
+
+            if agent_id not in existing:
+                try:
+                    with open(path, 'a', encoding='utf-8') as fh:
+                        fh.write(f"{agent_id}\n")
+                    logger.info("Added agent to allowlist file: %s", path)
+                except Exception:
+                    logger.exception("Failed to append agent to allowlist file")
+
+            # Try to update running server module's AGENT_ALLOWLIST if present
+            try:
+                import mcp_server
+                if hasattr(mcp_server, 'AGENT_ALLOWLIST'):
+                    try:
+                        mcp_server.AGENT_ALLOWLIST.add(agent_id)
+                        logger.info("Added agent to running server allowlist: %s", agent_id)
+                    except Exception:
+                        logger.exception("Failed updating mcp_server.AGENT_ALLOWLIST at runtime")
+            except Exception:
+                # Not fatal; server may not be running in same process
+                pass
+        except Exception:
+            logger.exception("ensure_agent_allowlisted failed for %s", agent_id)
+
     def setup_team_management(self, notebook):
         """Team management interface"""
         team_frame = ttk.Frame(notebook)
@@ -980,6 +1023,106 @@ class PerformantMCPView:
 
         # Initial stats
         self.update_performance_stats()
+
+    def setup_admin_tab(self, notebook):
+        """Admin tab for managing agent allowlist"""
+        admin_frame = ttk.Frame(notebook)
+        notebook.add(admin_frame, text="Admin")
+
+        allow_frame = ttk.LabelFrame(admin_frame, text="Agent Allowlist", padding="10")
+        allow_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # List of allowlisted agents
+        self.allowlist_var = tk.StringVar(value=self._read_allowlist_file())
+        self.allowlist_listbox = tk.Listbox(allow_frame, listvariable=self.allowlist_var, height=12, selectmode=tk.SINGLE)
+        self.allowlist_listbox.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(0,10))
+
+        # Controls
+        ctrl_frame = ttk.Frame(allow_frame)
+        ctrl_frame.pack(side=tk.RIGHT, fill=tk.Y)
+
+        ttk.Button(ctrl_frame, text="Add Agent", command=self._admin_add_agent).pack(fill=tk.X, pady=5)
+        ttk.Button(ctrl_frame, text="Remove Selected", command=self._admin_remove_selected).pack(fill=tk.X, pady=5)
+        ttk.Button(ctrl_frame, text="Reload Allowlist", command=self._admin_reload_allowlist).pack(fill=tk.X, pady=5)
+        ttk.Button(ctrl_frame, text="Persist & Push", command=self._admin_persist_and_push).pack(fill=tk.X, pady=5)
+
+    def _read_allowlist_file(self):
+        try:
+            path = os.environ.get('MCP_AGENT_ALLOWLIST_FILE') or os.path.expanduser('~/.mcp_allowlist.txt')
+            items = []
+            if os.path.exists(path):
+                with open(path, 'r', encoding='utf-8') as fh:
+                    for ln in fh:
+                        ln = ln.strip()
+                        if ln and not ln.startswith('#'):
+                            items.append(ln)
+            return items
+        except Exception:
+            logger.exception("Failed to read allowlist file")
+            return []
+
+    def _write_allowlist_file(self, items):
+        try:
+            path = os.environ.get('MCP_AGENT_ALLOWLIST_FILE') or os.path.expanduser('~/.mcp_allowlist.txt')
+            with open(path, 'w', encoding='utf-8') as fh:
+                for it in items:
+                    fh.write(f"{it}\n")
+            logger.info("Persisted allowlist to %s", path)
+        except Exception:
+            logger.exception("Failed to persist allowlist file")
+
+    def _admin_add_agent(self):
+        name = simpledialog.askstring("Add Agent to Allowlist", "Agent ID:", parent=self.root)
+        if not name:
+            return
+        items = list(self.allowlist_var.get()) if isinstance(self.allowlist_var.get(), (list, tuple)) else list(self._read_allowlist_file())
+        if name in items:
+            messagebox.showinfo("Info", "Agent already in allowlist", parent=self.root)
+            return
+        items.append(name)
+        self.allowlist_var.set(items)
+
+    def _admin_remove_selected(self):
+        sel = self.allowlist_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        items = list(self.allowlist_var.get()) if isinstance(self.allowlist_var.get(), (list, tuple)) else list(self._read_allowlist_file())
+        try:
+            removed = items.pop(idx)
+            self.allowlist_var.set(items)
+            messagebox.showinfo("Removed", f"Removed {removed} from allowlist", parent=self.root)
+        except Exception:
+            logger.exception("Failed removing selected allowlist item")
+
+    def _admin_reload_allowlist(self):
+        items = self._read_allowlist_file()
+        self.allowlist_var.set(items)
+        messagebox.showinfo("Reloaded", "Allowlist reloaded from file", parent=self.root)
+
+    def _admin_persist_and_push(self):
+        # Persist to file
+        items = list(self.allowlist_var.get()) if isinstance(self.allowlist_var.get(), (list, tuple)) else list(self._read_allowlist_file())
+        self._write_allowlist_file(items)
+
+        # Try to push to running server module
+        try:
+            import mcp_server
+            if hasattr(mcp_server, 'AGENT_ALLOWLIST'):
+                try:
+                    mcp_server.AGENT_ALLOWLIST.clear()
+                    for it in items:
+                        mcp_server.AGENT_ALLOWLIST.add(it)
+                    messagebox.showinfo("Pushed", "Allowlist pushed to running server", parent=self.root)
+                    logger.info("Pushed allowlist to running server: %s", items)
+                except Exception:
+                    logger.exception("Failed to update running server AGENT_ALLOWLIST")
+                    messagebox.showerror("Error", "Failed to push allowlist to server (see logs)", parent=self.root)
+            else:
+                messagebox.showwarning("Warning", "Running server not detected in-process; changes persisted to file only", parent=self.root)
+        except Exception:
+            logger.exception("Failed to push allowlist to running server")
+            messagebox.showwarning("Warning", "Could not contact running server in-process; allowlist persisted to file", parent=self.root)
 
     def load_tree_children(self, parent_item):
         """Load children for tree item on demand"""
@@ -1645,6 +1788,11 @@ class PerformantMCPView:
 
             self.model.clear_cache()
             self.load_agent_data()
+            # Ensure GUI-created agents are allowlisted so they can announce
+            try:
+                self.ensure_agent_allowlisted(agent_id)
+            except Exception:
+                logger.exception("Failed to ensure agent allowlist update for %s", agent_id)
             messagebox.showinfo("Success", f"Agent '{name}' created")
 
         except sqlite3.IntegrityError:

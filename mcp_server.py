@@ -29,6 +29,38 @@ logger = logging.getLogger("mcp_server")
 app = FastAPI(title="MCP Server")
 DB_PATH = "multi-agent_mcp_context_manager.db"
 
+
+# Agent allowlist: if non-empty, only these agent IDs may announce themselves.
+# Sources (checked in order): env MCP_AGENT_ALLOWLIST (comma-separated), file MCP_AGENT_ALLOWLIST_FILE or ~/.mcp_allowlist.txt
+def _load_agent_allowlist():
+    allow = set()
+    env = os.environ.get('MCP_AGENT_ALLOWLIST', '')
+    if env:
+        for p in [x.strip() for x in env.split(',') if x.strip()]:
+            allow.add(p)
+
+    path = os.environ.get('MCP_AGENT_ALLOWLIST_FILE') or os.path.expanduser('~/.mcp_allowlist.txt')
+    try:
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        allow.add(line)
+    except Exception:
+        logger.exception('Failed to read agent allowlist file')
+
+    return allow
+
+
+AGENT_ALLOWLIST = _load_agent_allowlist()
+
+
+def _is_agent_allowed(agent_id: str) -> bool:
+    if not AGENT_ALLOWLIST:
+        return True
+    return agent_id in AGENT_ALLOWLIST
+
 # Exponential backoff timings in seconds: 100ms, 200ms, 500ms, 1000ms, 2000ms, 5000ms
 BACKOFFS = [0.1, 0.2, 0.5, 1.0, 2.0, 5.0]
 
@@ -267,6 +299,21 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
             if isinstance(msg, dict) and msg.get("type") == "announce":
                 agent_id = msg.get("agent_id")
                 name = msg.get("name") or msg.get("agent_id")
+
+                # Enforce allowlist if configured
+                if not _is_agent_allowed(agent_id):
+                    logger.info(f"Rejected announce from non-allowlisted agent: {agent_id}")
+                    try:
+                        await manager.send_json(client_id, {"type": "announce_rejected", "agent_id": agent_id, "reason": "not_allowlisted"})
+                    except Exception:
+                        pass
+                    # Close the websocket for this client
+                    try:
+                        await websocket.close()
+                    except Exception:
+                        pass
+                    await manager.disconnect(client_id)
+                    break
 
                 def upsert_agent(aid, aname):
                     with get_connection() as conn:
