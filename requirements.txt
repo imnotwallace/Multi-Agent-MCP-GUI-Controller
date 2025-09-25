@@ -1,11 +1,10 @@
 # Multi-Agent MCP GUI Controller Dependencies
 
-# Core database
-sqlite3  # Built-in with Python
+# Required for performance version
+cachetools>=5.0.0  # For TTL caching and performance optimization
 
-# GUI framework - included with Python
-tkinter  # Built-in with Python
-
-# Optional performance enhancements
-cachetools>=5.0.0  # For data caching
-threading  # Built-in with Python
+# Built-in modules (no installation needed)
+# sqlite3 - Database operations
+# tkinter - GUI framework
+# threading - Background operations
+# logging - Application logging

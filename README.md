@@ -1,46 +1,56 @@
 # Multi-Agent MCP GUI Controller
 
-A hierarchical context management system for Multi-Agent MCP (Model Context Protocol) interactions with a modern GUI interface.
+A hierarchical context management system for Multi-Agent MCP (Model Context Protocol) interactions with advanced team management and bulk operations.
+
+## 🚀 New Features
+
+- **Team Management**: Create teams, assign agents to teams
+- **Multi-Agent Selection**: Select multiple agents with Ctrl+Click
+- **Bulk Operations**:
+  - Assign multiple agents to teams or sessions
+  - Bulk disconnect agents
+  - Mass team unassignment
+- **Agent Renaming**: Double-click agents to rename them
+- **Performance Enhanced**: TTL caching, connection pooling, background operations
 
 ## Features
 
-- **Hierarchical Organization**: Projects → Sessions → Agents
-- **Multiple Architectures**: Original, Refactored MVC, Performance-Enhanced
+- **Hierarchical Organization**: Projects → Sessions → Teams → Agents
+- **Advanced Team System**: Named teams with session association
+- **Bulk Agent Management**: Multi-select and bulk operations
 - **Database Management**: SQLite with soft deletes and foreign key constraints
-- **Input Validation**: Comprehensive validation with error handling
 - **Performance Optimizations**: Caching, connection pooling, lazy loading
-- **GUI Interface**: Three-tab interface for project, agent, and data views
+- **Modern GUI**: Multi-tab interface with Agent Management and Team Management
 
 ## Files
 
-- `multi-agent_mcp_gui_controller.py` - Original implementation with fixes
-- `mcp_refactored.py` - Clean MVC architecture version
-- `performance_enhanced.py` - High-performance version with caching
-- `test_functionality.py` - Comprehensive test suite
+- `main.py` - **Main application** (performance-enhanced with new features)
+- `archive/` - Archived older versions for reference
+- `test_new_features.py` - Tests for team and bulk operation features
 - `requirements.txt` - Dependencies
 
 ## Quick Start
 
-### Basic Version
+### Installation
 ```bash
-python multi-agent_mcp_gui_controller.py
-```
-
-### MVC Version
-```bash
-python mcp_refactored.py
-```
-
-### Performance Version
-```bash
+# Install required dependency
 pip install cachetools
-python performance_enhanced.py
+
+# Or use virtual environment
+python -m venv .venv
+.venv\Scripts\activate  # Windows
+pip install cachetools
+```
+
+### Run Application
+```bash
+python main.py
 ```
 
 ## Testing
 
 ```bash
-python test_functionality.py
+python test_new_features.py  # Test new features
 ```
 
 ## Database Schema
