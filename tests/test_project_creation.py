@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 def test_project_creation_direct():
     """Test project creation directly through model"""
     try:
-        from main import CachedMCPDataModel
+        from archive.main import CachedMCPDataModel
 
         # Create temporary database
         with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as tmp:

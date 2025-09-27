@@ -1,5 +1,124 @@
 # Multi-Agent MCP Context Manager - Changelog
 
+## [2.0.0] - 2025-09-28 - COMPLETE SYSTEM REDESIGN
+
+### 🎯 **MAJOR REDESIGN** - Following specifications from `.claude/Instructions/20250928_0159_instructions.md`
+
+### ✅ **COMPLETED PHASE 1: Core System Redesign**
+
+#### 🚫 **REMOVED**
+- **Allowlist functionality completely removed** as per requirements
+  - Removed all allowlist-related code from server and GUI
+  - Cleaned up database schema and management interfaces
+  - Removed file-based allowlist management
+
+#### 🔄 **DATABASE SCHEMA REDESIGN**
+- **Updated contexts table** to store `agent_id` instead of `connection_id`
+- **Added teams support** with proper JSON-based team management
+- **Enhanced agents table** with new permission system:
+  - `admin`: Can see all contexts in the same session
+  - `user`: Can see contexts from agents in the same team(s) within the same session
+  - `guest`: Can only see own contexts within the same session
+- **Added teams table** for structured team management
+- **Updated connections table** with IP address tracking
+
+#### 🔗 **CONNECTION ASSIGNMENT SCREEN REDESIGN**
+- **Left Panel - Active Connections:**
+  - Connection ID, IP address, timestamp connected
+  - Disconnect button for each connection
+  - Refresh button, search/filter functionality
+  - Scrollable and sortable columns
+- **Right Panel - Registered Agents:**
+  - Agent ID, permission level, teams (comma-separated)
+  - Connection status indicator
+  - Refresh button, search/filter functionality
+  - Scrollable and sortable columns
+
+#### 👥 **AGENT MANAGEMENT SCREEN ENHANCEMENT**
+- **Agent List Tab (Redesigned):**
+  - Full-width grid layout with improved button placement
+  - Bulk selection and operations support
+  - Add/delete agents with confirmation dialogs
+  - Permission level changes for multiple agents
+  - Team assignment/removal for multiple agents
+  - **CSV export functionality**
+  - **Markdown file import** - creates agents from .md filenames
+  - Search/filter by agent ID, permission level, or team
+  - Sortable columns
+- **Teams Tab (New TreeView):**
+  - TreeView showing teams and assigned agents
+  - Add/delete/rename team operations
+  - Bulk agent management within teams
+  - CSV export for team structure
+  - Search/filter functionality
+
+#### 📄 **NEW CONTEXTS SCREEN**
+- **Complete CRUD operations:**
+  - View all contexts with timestamp, project→session, agent ID
+  - Context snippet display (first 100 characters)
+  - Full context view in popup dialog
+  - Edit context functionality with save back to database
+  - Delete contexts (single or bulk) with confirmation
+- **Management features:**
+  - Search/filter by agent ID or context content
+  - Sortable columns (timestamp, agent, etc.)
+  - CSV export functionality
+  - Scrollable interface for large datasets
+
+#### 📊 **STATUS BAR IMPLEMENTATION**
+- **Real-time monitoring:**
+  - Active connections count
+  - Registered agents count
+  - Database connection status (connected/disconnected)
+  - Server status (running/stopped/error)
+  - Server IP address and port display
+- **Live updates every 5 seconds**
+
+#### 🛠️ **TECHNICAL IMPROVEMENTS**
+- **Enhanced MCP Server** (`redesigned_mcp_server.py`):
+  - Removed all allowlist functionality
+  - Updated database schema with team support
+  - Improved permission checking logic
+  - Enhanced API endpoints for management
+  - Better error handling and logging
+- **Redesigned GUI** (`redesigned_comprehensive_gui.py`):
+  - Complete interface redesign following specifications
+  - Multi-threaded status monitoring
+  - Enhanced user experience with bulk operations
+  - Comprehensive dialog systems
+- **New startup script** (`run_redesigned_system.py`):
+  - Server-only or server+GUI modes
+  - Environment variable configuration
+  - Improved error handling
+
+### 🧪 **TESTING & VALIDATION**
+- ✅ Database schema creation and migration tested
+- ✅ Server compilation and syntax validation
+- ✅ GUI components and dependencies verified
+- ✅ Permission system logic validated
+- ✅ API endpoints functionality confirmed
+
+### 📚 **DOCUMENTATION UPDATES**
+- Updated README.md with complete redesign information
+- Enhanced installation and usage instructions
+- Updated Claude Code integration examples
+- Comprehensive changelog documentation
+
+### 🔄 **MIGRATION NOTES**
+- **Breaking Changes:** Complete system redesign - not backward compatible
+- **Database:** Automatic schema updates handle existing databases
+- **Configuration:** Updated MCP server configuration format
+- **Files:** New main files - old system moved to legacy status
+
+### 🚀 **NEXT PHASE: RAG INTEGRATION**
+Phase 2 will implement RAG (Retrieval-Augmented Generation) functionality with:
+- `nomic-ai/nomic-embed-text-v1.5` model integration
+- Vector similarity search for large context datasets (50+ contexts)
+- Enhanced queryDB method with embedding-based retrieval
+- Automatic embedding generation and management
+
+---
+
 ## 📁 Repository Reorganization (September 28, 2025)
 
 ### **Project Structure Cleanup and Organization**

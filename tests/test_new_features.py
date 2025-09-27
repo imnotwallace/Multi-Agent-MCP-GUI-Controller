@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 def test_database_schema():
     """Test that new tables and columns exist"""
     try:
-        from main import CachedMCPDataModel
+        from archive.main import CachedMCPDataModel
 
         # Create temporary database
         with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as tmp:
@@ -56,7 +56,7 @@ def test_database_schema():
 def test_team_operations():
     """Test team creation and operations"""
     try:
-        from main import CachedMCPDataModel
+        from archive.main import CachedMCPDataModel
 
         # Create temporary database
         with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as tmp:
@@ -111,7 +111,7 @@ def test_team_operations():
 def test_bulk_session_operations():
     """Test bulk session assignment operations"""
     try:
-        from main import CachedMCPDataModel
+        from archive.main import CachedMCPDataModel
 
         # Create temporary database
         with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as tmp:
@@ -170,7 +170,7 @@ def test_bulk_session_operations():
 def test_agent_renaming():
     """Test agent renaming functionality"""
     try:
-        from main import CachedMCPDataModel
+        from archive.main import CachedMCPDataModel
 
         # Create temporary database
         with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as tmp:
@@ -208,7 +208,7 @@ def test_agent_renaming():
 def test_caching():
     """Test that caching works with new features"""
     try:
-        from main import CachedMCPDataModel
+        from archive.main import CachedMCPDataModel
 
         # Create temporary database
         with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as tmp:

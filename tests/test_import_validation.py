@@ -15,7 +15,7 @@ class TestImportValidation(unittest.TestCase):
     def test_main_module_import(self):
         """Test that main module can be imported"""
         try:
-            import main
+            import archive.main as main
             self.assertTrue(True)  # If we get here, import succeeded
         except ImportError as e:
             self.fail(f"Failed to import main module: {e}")
@@ -25,7 +25,7 @@ class TestImportValidation(unittest.TestCase):
     def test_cached_mcp_data_model_import(self):
         """Test that CachedMCPDataModel can be imported and instantiated"""
         try:
-            from main import CachedMCPDataModel
+            from archive.main import CachedMCPDataModel
             # Try creating instance with in-memory database
             model = CachedMCPDataModel(":memory:")
             self.assertIsInstance(model, CachedMCPDataModel)
@@ -35,7 +35,7 @@ class TestImportValidation(unittest.TestCase):
     def test_unified_dialog_import(self):
         """Test that UnifiedDialog can be imported"""
         try:
-            from main import UnifiedDialog
+            from archive.main import UnifiedDialog
             self.assertTrue(hasattr(UnifiedDialog, '__init__'))
         except Exception as e:
             self.fail(f"Failed to import UnifiedDialog: {e}")
@@ -43,7 +43,7 @@ class TestImportValidation(unittest.TestCase):
     def test_performant_mcp_view_import(self):
         """Test that PerformantMCPView can be imported"""
         try:
-            from main import PerformantMCPView
+            from archive.main import PerformantMCPView
             self.assertTrue(hasattr(PerformantMCPView, '__init__'))
         except Exception as e:
             self.fail(f"Failed to import PerformantMCPView: {e}")
@@ -70,7 +70,7 @@ class TestImportValidation(unittest.TestCase):
 
     def test_main_classes_exist(self):
         """Test that main classes exist and have expected methods"""
-        from main import CachedMCPDataModel, PerformantMCPView, UnifiedDialog
+        from archive.main import CachedMCPDataModel, PerformantMCPView, UnifiedDialog
 
         # Test CachedMCPDataModel methods
         expected_model_methods = [

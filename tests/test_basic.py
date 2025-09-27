@@ -17,7 +17,7 @@ class TestBasicFunctionality(unittest.TestCase):
     def test_imports_work(self):
         """Test that imports work correctly"""
         try:
-            from main import CachedMCPDataModel, PerformantMCPView, UnifiedDialog
+            from archive.main import CachedMCPDataModel, PerformantMCPView, UnifiedDialog
             self.assertTrue(True)
         except Exception as e:
             self.fail(f"Import failed: {e}")
@@ -25,7 +25,7 @@ class TestBasicFunctionality(unittest.TestCase):
     def test_database_creation(self):
         """Test database can be created"""
         try:
-            from main import CachedMCPDataModel
+            from archive.main import CachedMCPDataModel
             model = CachedMCPDataModel(":memory:")
             self.assertIsNotNone(model)
         except Exception as e:
@@ -34,7 +34,7 @@ class TestBasicFunctionality(unittest.TestCase):
     def test_basic_operations(self):
         """Test basic CRUD operations"""
         try:
-            from main import CachedMCPDataModel
+            from archive.main import CachedMCPDataModel
             model = CachedMCPDataModel(":memory:")
 
             # Test getting empty data
@@ -62,7 +62,7 @@ class TestBasicFunctionality(unittest.TestCase):
     def test_team_to_session_assignment_core_logic(self):
         """Test the core logic of team-to-session assignment"""
         try:
-            from main import CachedMCPDataModel
+            from archive.main import CachedMCPDataModel
             from datetime import datetime
 
             model = CachedMCPDataModel(":memory:")
@@ -156,7 +156,7 @@ class TestBasicFunctionality(unittest.TestCase):
     def test_application_startup_simulation(self):
         """Test simulating application startup without GUI"""
         try:
-            from main import CachedMCPDataModel
+            from archive.main import CachedMCPDataModel
 
             # Simulate application startup
             model = CachedMCPDataModel(":memory:")
@@ -184,7 +184,7 @@ class TestBasicFunctionality(unittest.TestCase):
     def test_new_team_assignment_button_logic(self):
         """Test the logic that would be behind the new team assignment button"""
         try:
-            from main import CachedMCPDataModel
+            from archive.main import CachedMCPDataModel
             from datetime import datetime
 
             model = CachedMCPDataModel(":memory:")

@@ -18,7 +18,12 @@
       "Bash(dir:*)",
       "Bash(mkdir:*)",
       "Bash(mv:*)",
-      "Bash(set LAUNCH_GUI=true)"
+      "Bash(set LAUNCH_GUI=true)",
+      "Bash(rm:*)",
+      "Bash(del \"F:\\Python\\Multi-Agent_MCP_GUI_Controller\\mcp_allowlist.json\")",
+      "Bash(del \"multi-agent_mcp_context_manager.db\")",
+      "Bash(timeout:*)",
+      "Bash(git add:*)"
     ],
     "deny": [],
     "ask": []

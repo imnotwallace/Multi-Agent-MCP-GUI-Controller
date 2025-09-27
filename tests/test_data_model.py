@@ -15,7 +15,7 @@ import time
 
 # Add parent directory to path to import main module
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from main import CachedMCPDataModel
+from archive.main import CachedMCPDataModel
 
 
 class TestCachedMCPDataModel(unittest.TestCase):

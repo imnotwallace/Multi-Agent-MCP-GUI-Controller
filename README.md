@@ -2,44 +2,64 @@
 
 A comprehensive context management system for Multi-Agent MCP (Model Context Protocol) interactions with advanced permission system, connection management, and Claude Code integration.
 
-## 🎯 **REDESIGNED SYSTEM** (September 28, 2025)
+## 🎯 **COMPLETELY REDESIGNED SYSTEM** (September 28, 2025)
 
-This system has been completely redesigned according to specifications to include:
+This system has been completely redesigned according to the latest specifications to include:
 
-- **🔗 MCP Server Integration**: Direct Claude Code MCP server support
-- **📁 File-Based Allow List**: No more global variables, proper file management
-- **🔐 Three-Tier Permissions**: Self/Team/Session level access control
-- **🌐 Connection Management**: 1-to-1 agent-connection assignment system
-- **📋 Clear Instructions**: Built-in GUI with data format guidance
+- **🚫 No Allowlist**: Removed allowlist functionality as per requirements
+- **🔗 Enhanced MCP Server**: Direct Claude Code MCP server support with improved schema
+- **🔐 Three-Tier Permissions**: Admin/User/Guest permission system
+- **👥 Advanced Teams**: JSON-based team management with full CRUD operations
+- **🌐 Smart Connection Management**: Redesigned connection assignment with dual-panel interface
+- **📄 Context Management**: Full CRUD operations for contexts with search and export
+- **📊 Live Status Bar**: Real-time server and database monitoring
 - **🔄 Auto Database Setup**: Automatic database initialization and schema management
 
 ## 🚀 Key Features
 
-### **Core MCP Server** (`redesigned_mcp_server.py`)
-- **File-based allow list** stored in `mcp_allowlist.json`
-- **Automatic database initialization** - creates DB if missing
-- **Unknown connection registration** - auto-registers first-time connections
-- **1-to-1 agent assignment** - each connection assigned to exactly one agent
-- **Permission-aware context access** with three levels:
-  - `self_only`: Agent reads only own contexts
-  - `team_level`: Agent reads contexts from same team
-  - `session_level`: Agent reads all contexts in session
+### **Redesigned MCP Server** (`redesigned_mcp_server.py`)
+- **No allowlist functionality** - removed as per specifications
+- **Enhanced database schema** - supports teams, projects, sessions
+- **Advanced permission system** with three levels:
+  - `admin`: Can see all contexts in the same session
+  - `user`: Can see contexts from agents in the same team(s) within the same session
+  - `guest`: Can only see own contexts within the same session
+- **Team-based access control** - JSON-stored team memberships
+- **Auto connection registration** - registers and manages connections
+- **Improved API endpoints** - comprehensive REST API for management
 - **Simplified JSON responses** - Streamlined ReadDB/WriteDB formats
 
-### **Comprehensive Management GUI** (`comprehensive_enhanced_gui.py`)
-- **📋 Updated Data Format Instructions**: New simplified JSON formats
-- **🔐 Allow List Management**: Add/remove agents from server allow list
-- **👥 Complete Agent Management**:
-  - Agent creation, renaming, and deletion
-  - Permission level configuration (self/team/session)
-  - Team assignment and management
-  - Bulk operations for efficiency
-- **📁 Project & Session Management**:
-  - Create/delete projects and sessions
-  - Assign agents to sessions (1-to-1)
-  - Hierarchical organization
-- **🔗 Connection Assignment**: Visual agent-connection management
-- **📊 Real-time Status Monitoring**: Live connection and agent status
+### **Redesigned Comprehensive GUI** (`redesigned_comprehensive_gui.py`)
+- **📋 Data Format Instructions**:
+  - Complete ReadDB/WriteDB documentation with examples
+  - Updated format specifications with simplified JSON responses
+  - Python client examples for WebSocket communication
+- **📁 Enhanced Project & Sessions Management**:
+  - Tree view with projects→sessions→agents hierarchy
+  - Search and filter functionality for projects and sessions
+  - Sorting by name, creation date, or agent count
+  - Create/rename/delete projects and sessions with validation
+  - Details & Management panel with inline editing
+  - Agent assignment with conflict detection and validation
+  - Auto-generated integer IDs with unique name enforcement
+  - Agent filtering (show unassigned only, search by name/team)
+- **🔗 Connection Assignment (Redesigned)**:
+  - Left panel: Active connections with IP, timestamp, disconnect button
+  - Right panel: Registered agents with permission levels and teams
+  - Search/filter functionality, sortable columns
+- **👥 Enhanced Agent Management**:
+  - Agent List tab: Full-width grid with bulk operations
+  - Teams tab: TreeView showing teams and members
+  - Add/delete/permission changes with bulk selection
+  - CSV export and Markdown file import functionality
+- **📄 New Contexts Screen**:
+  - View all contexts with project→session info
+  - Full CRUD operations (view, edit, delete)
+  - Search/filter and CSV export capabilities
+- **📊 Live Status Bar**: Real-time monitoring of:
+  - Active connections count, registered agents count
+  - Database connection status, server status
+  - Server IP address and port
 
 ### **Claude Code Integration**
 Ready-to-use MCP configuration in `mcp_server_config.json`:
@@ -101,15 +121,23 @@ Ready-to-use MCP configuration in `mcp_server_config.json`:
 - `mcp_server.py` - Original MCP server
 - `multi_agent_mcp_server.py` - Legacy multi-agent server
 
-### **Documentation & Support**
-- `docs/` - Comprehensive documentation
-- `scripts/` - Migration and utility scripts
-- `archive/` - Historical files and backups
-- `tests/` - Test suite
+### **System Files**
+- **Core Redesigned System**:
+  - `redesigned_mcp_server.py` - Main MCP server with new schema and no allowlist
+  - `redesigned_comprehensive_gui.py` - Complete GUI redesign with all specifications
+  - `run_redesigned_system.py` - Startup script for server + optional GUI
+- **Legacy System** (maintained for compatibility):
+  - `comprehensive_enhanced_gui.py` - Previous GUI version
+  - `redesigned_mcp_server.py` - Previous server version
+- **Documentation & Support**:
+  - `docs/` - Comprehensive documentation
+  - `scripts/` - Migration and utility scripts
+  - `archive/` - Historical files and backups
+  - `tests/` - Test suite
 
 ## 🚀 Quick Start
 
-### **New Redesigned System** (Recommended)
+### **Redesigned System** (Latest - Recommended)
 
 #### 1. Installation
 ```bash
@@ -123,23 +151,30 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-#### 2. Start MCP Server
+#### 2. Start Redesigned System
+**Server Only:**
 ```bash
-python run_redesigned_mcp_server.py
+python run_redesigned_system.py
 ```
+
+**Server + GUI:**
+```bash
+set LAUNCH_GUI=true
+python run_redesigned_system.py
+```
+
+**OR Start Components Separately:**
+```bash
+# Start server
+python redesigned_mcp_server.py
+
+# Start GUI (in another terminal)
+python redesigned_comprehensive_gui.py
+```
+
 Server starts on `http://127.0.0.1:8765` with WebSocket endpoint `/ws/{connection_id}`
 
-#### 3. Launch Comprehensive Management GUI
-```bash
-python comprehensive_enhanced_gui.py
-```
-
-**OR** Launch Basic Enhanced GUI:
-```bash
-python enhanced_gui_module.py
-```
-
-#### 4. Configure Claude Code
+#### 3. Configure Claude Code
 Choose one of these configurations:
 
 **Server Only (Recommended):**
@@ -148,7 +183,7 @@ Choose one of these configurations:
   "mcpServers": {
     "multi-agent-context-manager": {
       "command": "python",
-      "args": ["run_redesigned_mcp_server.py"],
+      "args": ["run_redesigned_system.py"],
       "env": {
         "LAUNCH_GUI": "false"
       }
@@ -163,7 +198,7 @@ Choose one of these configurations:
   "mcpServers": {
     "multi-agent-context-manager-with-gui": {
       "command": "python",
-      "args": ["run_redesigned_mcp_server.py"],
+      "args": ["run_redesigned_system.py"],
       "env": {
         "LAUNCH_GUI": "true"
       }

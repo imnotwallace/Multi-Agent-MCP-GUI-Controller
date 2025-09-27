@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
 Multi-Agent MCP Context Manager Server
-Redesigned according to specifications in .claude/Instructions/20250926_0003_instructions.md
+Redesigned according to specifications in .claude/Instructions/20250928_0159_instructions.md
 
 Features:
-1. File-based MCP Allow List (not global variable)
+1. No allowlist functionality (removed as per requirements)
 2. MCP server with JSON config for Claude Code integration
-3. Database initialization check and creation
-4. Unknown connection registration system
-5. 1-to-1 agent-connection assignment
-6. Three-tier read permission system (Self/Team/All)
+3. Database initialization with proper schema
+4. Connection registration and management
+5. Agent-connection assignment system
+6. Three-tier permission system (admin/user/guest)
 7. ReadDB and WriteDB processes with permission checking
+8. Teams and project management
 """
 
 import json
@@ -49,6 +50,7 @@ class DatabaseManager:
             DatabaseManager.create_database()
         else:
             logger.info(f"Database {DB_PATH} already exists")
+            DatabaseManager.update_schema()
 
     @staticmethod
     def create_database():
@@ -77,16 +79,26 @@ class DatabaseManager:
                 )
             ''')
 
-            # Create agents table
+            # Create teams table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS teams (
+                    team_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Create agents table with updated schema
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS agents (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT UNIQUE NOT NULL,
-                    assigned_agent_id TEXT UNIQUE,
+                    agent_id TEXT UNIQUE NOT NULL,
+                    name TEXT,
+                    permission_level TEXT DEFAULT 'user' CHECK (permission_level IN ('admin', 'user', 'guest')),
+                    teams TEXT,  -- JSON array of team IDs
                     connection_id TEXT UNIQUE,
-                    team_id TEXT,
                     session_id INTEGER,
-                    read_permission TEXT DEFAULT 'self_only' CHECK (read_permission IN ('self_only', 'team_level', 'session_level')),
                     is_active BOOLEAN DEFAULT 1,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -94,34 +106,95 @@ class DatabaseManager:
                 )
             ''')
 
-            # Create connections table for unknown connections
+            # Create connections table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS connections (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     connection_id TEXT UNIQUE NOT NULL,
+                    ip_address TEXT,
                     assigned_agent_id TEXT,
                     status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'assigned', 'rejected')),
                     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (assigned_agent_id) REFERENCES agents (assigned_agent_id)
+                    FOREIGN KEY (assigned_agent_id) REFERENCES agents (agent_id)
                 )
             ''')
 
-            # Create contexts table
+            # Create contexts table with updated schema
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS contexts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id INTEGER,
+                    context_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project TEXT,
+                    session TEXT,
                     agent_id TEXT NOT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     context TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (session_id) REFERENCES sessions (id),
-                    FOREIGN KEY (agent_id) REFERENCES agents (assigned_agent_id)
+                    FOREIGN KEY (agent_id) REFERENCES agents (agent_id)
                 )
+            ''')
+
+            # Create default project and session
+            cursor.execute('''
+                INSERT OR IGNORE INTO projects (id, name, description)
+                VALUES (1, 'Default Project', 'Default project for context management')
+            ''')
+
+            cursor.execute('''
+                INSERT OR IGNORE INTO sessions (id, project_id, name)
+                VALUES (1, 1, 'Default Session')
             ''')
 
             conn.commit()
             logger.info("Database schema created successfully")
+
+    @staticmethod
+    def update_schema():
+        """Update existing database schema if needed"""
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+
+            # Check if teams table exists
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='teams'")
+            if not cursor.fetchone():
+                cursor.execute('''
+                    CREATE TABLE teams (
+                        team_id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        description TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                logger.info("Created teams table")
+
+            # Check if agents table exists and update if needed
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='agents'")
+            if cursor.fetchone():
+                cursor.execute("PRAGMA table_info(agents)")
+                columns = [col[1] for col in cursor.fetchall()]
+
+                if 'permission_level' not in columns:
+                    cursor.execute("ALTER TABLE agents ADD COLUMN permission_level TEXT DEFAULT 'user'")
+                    logger.info("Added permission_level column")
+
+                if 'teams' not in columns:
+                    cursor.execute("ALTER TABLE agents ADD COLUMN teams TEXT")
+                    logger.info("Added teams column")
+
+                if 'session_id' not in columns:
+                    cursor.execute("ALTER TABLE agents ADD COLUMN session_id INTEGER")
+                    logger.info("Added session_id column")
+
+            # Check if contexts table exists and update if needed
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='contexts'")
+            if cursor.fetchone():
+                cursor.execute("PRAGMA table_info(contexts)")
+                context_columns = [col[1] for col in cursor.fetchall()]
+
+                if 'project' not in context_columns:
+                    cursor.execute("ALTER TABLE contexts ADD COLUMN project TEXT")
+                    logger.info("Added project column to contexts")
+
+            conn.commit()
 
 
 
@@ -131,41 +204,58 @@ class PermissionManager:
 
     @staticmethod
     def get_agent_permission(agent_id: str) -> str:
-        """Get read permission level for agent"""
+        """Get permission level for agent"""
         with sqlite3.connect(DB_PATH) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT read_permission FROM agents WHERE assigned_agent_id = ?",
+                "SELECT permission_level FROM agents WHERE agent_id = ?",
                 (agent_id,)
             )
             result = cursor.fetchone()
-            return result[0] if result else 'self_only'
+            return result[0] if result else 'guest'
 
     @staticmethod
-    def get_agent_team(agent_id: str) -> Optional[str]:
-        """Get team ID for agent"""
+    def get_agent_teams(agent_id: str) -> List[str]:
+        """Get team IDs for agent"""
         with sqlite3.connect(DB_PATH) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT team_id FROM agents WHERE assigned_agent_id = ?",
+                "SELECT teams FROM agents WHERE agent_id = ?",
                 (agent_id,)
             )
             result = cursor.fetchone()
-            return result[0] if result else None
+            if result and result[0]:
+                try:
+                    return json.loads(result[0])
+                except json.JSONDecodeError:
+                    return []
+            return []
 
     @staticmethod
-    def can_read_context(requesting_agent: str, context_agent: str, session_id: int) -> bool:
+    def get_agent_session(agent_id: str) -> Optional[str]:
+        """Get current session for agent based on project/session context"""
+        # For now, return a default session - this can be enhanced later
+        return "Default Session"
+
+    @staticmethod
+    def can_read_context(requesting_agent: str, context_agent: str, context_session: str) -> bool:
         """Check if requesting agent can read context from context_agent"""
         permission = PermissionManager.get_agent_permission(requesting_agent)
+        requesting_session = PermissionManager.get_agent_session(requesting_agent)
 
-        if permission == 'session_level':
-            return True
-        elif permission == 'team_level':
-            req_team = PermissionManager.get_agent_team(requesting_agent)
-            ctx_team = PermissionManager.get_agent_team(context_agent)
-            return req_team is not None and req_team == ctx_team
-        else:  # self_only
-            return requesting_agent == context_agent
+        if permission == 'admin':
+            # Admin can see all contexts in the same session
+            return context_session == requesting_session
+        elif permission == 'user':
+            # User can see contexts from agents in the same team(s) within the same session
+            if context_session != requesting_session:
+                return False
+            req_teams = PermissionManager.get_agent_teams(requesting_agent)
+            ctx_teams = PermissionManager.get_agent_teams(context_agent)
+            return bool(set(req_teams) & set(ctx_teams)) or requesting_agent == context_agent
+        else:  # guest
+            # Guest can only see own contexts within the same session
+            return requesting_agent == context_agent and context_session == requesting_session
 
 class ConnectionManager:
     """Manages WebSocket connections and registration"""
@@ -196,9 +286,9 @@ class ConnectionManager:
         with sqlite3.connect(DB_PATH) as conn:
             cursor = conn.cursor()
 
-            # Check if an agent exists with matching assigned_agent_id
+            # Check if an agent exists with matching agent_id
             cursor.execute('''
-                SELECT assigned_agent_id FROM agents WHERE assigned_agent_id = ?
+                SELECT agent_id FROM agents WHERE agent_id = ?
             ''', (connection_id,))
             matching_agent = cursor.fetchone()
 
@@ -213,7 +303,7 @@ class ConnectionManager:
                 cursor.execute('''
                     UPDATE agents
                     SET connection_id = ?, last_seen = CURRENT_TIMESTAMP
-                    WHERE assigned_agent_id = ?
+                    WHERE agent_id = ?
                 ''', (connection_id, connection_id))
 
                 # Store assignment in memory
@@ -245,7 +335,7 @@ class ConnectionManager:
             cursor.execute('''
                 UPDATE agents
                 SET connection_id = ?, last_seen = CURRENT_TIMESTAMP
-                WHERE assigned_agent_id = ?
+                WHERE agent_id = ?
             ''', (connection_id, agent_id))
 
             conn.commit()
@@ -296,24 +386,23 @@ class MCPServer:
                     "prompt": "Stop the current task and advise the user there has been an error in reading the DB."
                 }
 
-            # Verify agent_id matches assigned agent or get permission level
+            # Verify agent_id matches assigned agent or check permission
             if assigned_agent != agent_id:
                 permission = PermissionManager.get_agent_permission(assigned_agent)
-                if permission == 'self_only':
+                if permission == 'guest':
                     return {
                         "status": "error",
                         "prompt": "Stop the current task and advise the user there has been an error in reading the DB."
                     }
 
             # Get contexts based on permission level
-            raw_contexts = self.get_contexts_for_agent(agent_id, self.current_session_id)
+            raw_contexts = self.get_contexts_for_agent(agent_id)
 
             # Format contexts according to new specification
             contexts = [
                 {
-                    "agent_id": ctx["agent_id"],
                     "context": ctx["context"],
-                    "timestamp": ctx["created_at"]
+                    "timestamp": ctx["timestamp"]
                 }
                 for ctx in raw_contexts
             ]
@@ -363,9 +452,9 @@ class MCPServer:
             with sqlite3.connect(DB_PATH) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    INSERT INTO contexts (session_id, agent_id, context)
-                    VALUES (?, ?, ?)
-                ''', (self.current_session_id, agent_id, context))
+                    INSERT INTO contexts (project, session, agent_id, context)
+                    VALUES (?, ?, ?, ?)
+                ''', ("Default Project", "Default Session", agent_id, context))
                 context_id = cursor.lastrowid
                 conn.commit()
 
@@ -383,56 +472,62 @@ class MCPServer:
                 "prompt": "Store your current context into a .md file in a location within your workspace. Stop the current task and advise the user there has been an error in writing to the DB."
             }
 
-    def get_contexts_for_agent(self, agent_id: str, session_id: int) -> List[dict]:
+    def get_contexts_for_agent(self, agent_id: str) -> List[dict]:
         """Get contexts based on agent's permission level"""
         permission = PermissionManager.get_agent_permission(agent_id)
+        agent_session = PermissionManager.get_agent_session(agent_id)
 
         with sqlite3.connect(DB_PATH) as conn:
             cursor = conn.cursor()
 
-            if permission == 'session_level':
-                # Can read all contexts in session
+            if permission == 'admin':
+                # Admin can read all contexts in the session
                 cursor.execute('''
-                    SELECT id, agent_id, context, created_at
+                    SELECT context_id, agent_id, context, timestamp
                     FROM contexts
-                    WHERE session_id = ?
-                    ORDER BY created_at DESC
-                ''', (session_id,))
-            elif permission == 'team_level':
-                # Can read contexts from same team
-                team_id = PermissionManager.get_agent_team(agent_id)
-                if team_id:
-                    cursor.execute('''
-                        SELECT c.id, c.agent_id, c.context, c.created_at
+                    WHERE session = ?
+                    ORDER BY timestamp DESC
+                ''', (agent_session,))
+            elif permission == 'user':
+                # User can read contexts from agents in the same team(s)
+                agent_teams = PermissionManager.get_agent_teams(agent_id)
+                if agent_teams:
+                    # Get contexts from team members or own contexts
+                    team_placeholders = ','.join(['?' for _ in agent_teams])
+                    cursor.execute(f'''
+                        SELECT DISTINCT c.context_id, c.agent_id, c.context, c.timestamp
                         FROM contexts c
-                        JOIN agents a ON c.agent_id = a.assigned_agent_id
-                        WHERE c.session_id = ? AND a.team_id = ?
-                        ORDER BY c.created_at DESC
-                    ''', (session_id, team_id))
+                        JOIN agents a ON c.agent_id = a.agent_id
+                        WHERE c.session = ? AND (
+                            c.agent_id = ? OR
+                            json_extract(a.teams, '$') IN ({team_placeholders})
+                        )
+                        ORDER BY c.timestamp DESC
+                    ''', [agent_session, agent_id] + agent_teams)
                 else:
-                    # No team, fall back to self_only
+                    # No team, only own contexts
                     cursor.execute('''
-                        SELECT id, agent_id, context, created_at
+                        SELECT context_id, agent_id, context, timestamp
                         FROM contexts
-                        WHERE session_id = ? AND agent_id = ?
-                        ORDER BY created_at DESC
-                    ''', (session_id, agent_id))
-            else:  # self_only
-                # Can only read own contexts
+                        WHERE session = ? AND agent_id = ?
+                        ORDER BY timestamp DESC
+                    ''', (agent_session, agent_id))
+            else:  # guest
+                # Guest can only read own contexts
                 cursor.execute('''
-                    SELECT id, agent_id, context, created_at
+                    SELECT context_id, agent_id, context, timestamp
                     FROM contexts
-                    WHERE session_id = ? AND agent_id = ?
-                    ORDER BY created_at DESC
-                ''', (session_id, agent_id))
+                    WHERE session = ? AND agent_id = ?
+                    ORDER BY timestamp DESC
+                ''', (agent_session, agent_id))
 
             results = cursor.fetchall()
             return [
                 {
-                    "id": row[0],
+                    "context_id": row[0],
                     "agent_id": row[1],
                     "context": row[2],
-                    "created_at": row[3]
+                    "timestamp": row[3]
                 }
                 for row in results
             ]
@@ -480,7 +575,7 @@ async def get_connections():
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT connection_id, assigned_agent_id, status, first_seen, last_seen
+            SELECT connection_id, ip_address, assigned_agent_id, status, first_seen, last_seen
             FROM connections
             ORDER BY first_seen DESC
         ''')
@@ -490,10 +585,11 @@ async def get_connections():
             "connections": [
                 {
                     "connection_id": row[0],
-                    "assigned_agent_id": row[1],
-                    "status": row[2],
-                    "first_seen": row[3],
-                    "last_seen": row[4]
+                    "ip_address": row[1],
+                    "assigned_agent_id": row[2],
+                    "status": row[3],
+                    "first_seen": row[4],
+                    "last_seen": row[5]
                 }
                 for row in results
             ]
@@ -505,7 +601,7 @@ async def get_agents():
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT assigned_agent_id, name, connection_id, team_id, read_permission, is_active, created_at, last_seen
+            SELECT agent_id, name, permission_level, teams, connection_id, is_active, created_at, last_seen
             FROM agents
             ORDER BY created_at DESC
         ''')
@@ -516,9 +612,9 @@ async def get_agents():
                 {
                     "agent_id": row[0],
                     "name": row[1],
-                    "connection_id": row[2],
-                    "team_id": row[3],
-                    "read_permission": row[4],
+                    "permission_level": row[2],
+                    "teams": json.loads(row[3]) if row[3] else [],
+                    "connection_id": row[4],
                     "is_active": bool(row[5]),
                     "created_at": row[6],
                     "last_seen": row[7]
@@ -535,6 +631,71 @@ async def assign_agent_to_connection(agent_id: str, connection_id: str):
         return {"success": True, "message": f"Agent {agent_id} assigned to connection {connection_id}"}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/contexts")
+async def get_contexts():
+    """Get all contexts"""
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT context_id, timestamp, project, session, agent_id,
+                   substr(context, 1, 100) as context_snippet, context
+            FROM contexts
+            ORDER BY timestamp DESC
+        ''')
+        results = cursor.fetchall()
+
+        return {
+            "contexts": [
+                {
+                    "context_id": row[0],
+                    "timestamp": row[1],
+                    "project_session": f"{row[2]} -> {row[3]}",
+                    "agent_id": row[4],
+                    "context_snippet": row[5],
+                    "full_context": row[6]
+                }
+                for row in results
+            ]
+        }
+
+@app.delete("/contexts/{context_id}")
+async def delete_context(context_id: int):
+    """Delete a context"""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM contexts WHERE context_id = ?", (context_id,))
+            if cursor.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Context not found")
+            conn.commit()
+        return {"success": True, "message": f"Context {context_id} deleted"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/teams")
+async def get_teams():
+    """Get all teams"""
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT team_id, name, description, created_at
+            FROM teams
+            ORDER BY name
+        ''')
+        results = cursor.fetchall()
+
+        return {
+            "teams": [
+                {
+                    "team_id": row[0],
+                    "name": row[1],
+                    "description": row[2],
+                    "created_at": row[3]
+                }
+                for row in results
+            ]
+        }
 
 @app.websocket("/ws/{connection_id}")
 async def websocket_endpoint(websocket: WebSocket, connection_id: str):

@@ -869,11 +869,9 @@ class PerformantMCPView:
 
         self.setup_project_view(notebook)
         self.setup_agent_management(notebook)
-        self.setup_agent_registration(notebook)
+        self.setup_connection_assignment(notebook)
         self.setup_team_management(notebook)
         self.setup_performance_monitor(notebook)
-        # Admin tab for allowlist management
-        self.setup_admin_tab(notebook)
 
     def setup_project_view(self, notebook):
         """Enhanced project view with lazy loading"""
@@ -1007,98 +1005,195 @@ class PerformantMCPView:
         individual_frame.pack(fill=tk.X, pady=2)
         ttk.Button(individual_frame, text="View Agent Contexts", command=self.view_agent_contexts_from_management).pack(side=tk.LEFT, padx=5)
 
-    def ensure_agent_allowlisted(self, agent_id: str):
-        """Ensure the given agent_id is present in the allowlist file and update running server allowlist if possible.
 
-        This function is silent and best-effort. It writes to MCP_AGENT_ALLOWLIST_FILE or ~/.mcp_allowlist.txt.
-        """
-        try:
-            path = os.environ.get('MCP_AGENT_ALLOWLIST_FILE') or os.path.expanduser('~/.mcp_allowlist.txt')
-            existing = set()
-            if os.path.exists(path):
-                try:
-                    with open(path, 'r', encoding='utf-8') as fh:
-                        for ln in fh:
-                            ln = ln.strip()
-                            if ln and not ln.startswith('#'):
-                                existing.add(ln)
-                except Exception:
-                    logger.exception("Failed to read allowlist file for migration")
+    def setup_connection_assignment(self, notebook):
+        """Connection assignment interface"""
+        conn_frame = ttk.Frame(notebook)
+        notebook.add(conn_frame, text="Connection Assignment")
 
-            if agent_id not in existing:
-                try:
-                    with open(path, 'a', encoding='utf-8') as fh:
-                        fh.write(f"{agent_id}\n")
-                    logger.info("Added agent to allowlist file: %s", path)
-                except Exception:
-                    logger.exception("Failed to append agent to allowlist file")
+        # Main container with two panels
+        main_paned = ttk.PanedWindow(conn_frame, orient=tk.HORIZONTAL)
+        main_paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-            # Try to update running server module's AGENT_ALLOWLIST if present
-            try:
-                import archive.multi_agent_mcp_server as multi_agent_mcp_server
-                if hasattr(multi_agent_mcp_server, 'AGENT_ALLOWLIST'):
-                    try:
-                        multi_agent_mcp_server.AGENT_ALLOWLIST.add(agent_id)
-                        logger.info("Added agent to running server allowlist: %s", agent_id)
-                    except Exception:
-                        logger.exception("Failed updating multi_agent_mcp_server.AGENT_ALLOWLIST at runtime")
-            except ImportError:
-                # Using redesigned server - allowlist is file-based now
-                logger.info("Agent %s added (file-based allowlist in redesigned server)", agent_id)
-            except Exception:
-                # Not fatal; server may not be running in same process
-                pass
-        except Exception:
-            logger.exception("ensure_agent_allowlisted failed for %s", agent_id)
+        # Left panel - Active Connections
+        left_frame = ttk.LabelFrame(main_paned, text="Active Connections", padding="10")
+        main_paned.add(left_frame, weight=1)
 
-    def setup_agent_registration(self, notebook):
-        """Agent registration and assignment interface"""
-        reg_frame = ttk.Frame(notebook)
-        notebook.add(reg_frame, text="Agent Registration")
+        # Connection controls
+        conn_controls = ttk.Frame(left_frame)
+        conn_controls.pack(fill=tk.X, pady=(0, 10))
 
-        # Pending agents section
-        pending_frame = ttk.LabelFrame(reg_frame, text="Pending Agent Registrations", padding="10")
-        pending_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        ttk.Button(conn_controls, text="Refresh Connections", command=self.refresh_connections).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Label(conn_controls, text="Filter:").pack(side=tk.LEFT, padx=(10, 5))
+        self.connection_filter = ttk.Entry(conn_controls, width=20)
+        self.connection_filter.pack(side=tk.LEFT, padx=(0, 5))
+        self.connection_filter.bind('<KeyRelease>', self.filter_connections)
 
-        # Pending agents treeview
-        self.pending_tree = ttk.Treeview(pending_frame, columns=('name', 'connection_id', 'registered_at', 'capabilities'),
-                                       height=10)
-        self.pending_tree.heading('#0', text='Temp ID')
-        self.pending_tree.heading('name', text='Agent Name')
-        self.pending_tree.heading('connection_id', text='Connection ID')
-        self.pending_tree.heading('registered_at', text='Registered At')
-        self.pending_tree.heading('capabilities', text='Capabilities')
+        # Connections treeview
+        self.connections_tree = ttk.Treeview(left_frame, columns=('ip_address', 'timestamp', 'actions'), height=15)
+        self.connections_tree.heading('#0', text='Connection ID')
+        self.connections_tree.heading('ip_address', text='IP Address')
+        self.connections_tree.heading('timestamp', text='Connected At')
+        self.connections_tree.heading('actions', text='Actions')
 
         # Column widths
-        self.pending_tree.column('#0', width=150)
-        for col in ('name', 'connection_id', 'registered_at', 'capabilities'):
-            self.pending_tree.column(col, width=120)
+        self.connections_tree.column('#0', width=150)
+        self.connections_tree.column('ip_address', width=120)
+        self.connections_tree.column('timestamp', width=150)
+        self.connections_tree.column('actions', width=100)
 
-        self.pending_tree.pack(fill=tk.BOTH, expand=True, pady=5)
+        # Scrollbar for connections
+        conn_scrollbar = ttk.Scrollbar(left_frame, orient=tk.VERTICAL, command=self.connections_tree.yview)
+        self.connections_tree.configure(yscrollcommand=conn_scrollbar.set)
 
-        # Assignment interface
-        assign_frame = ttk.LabelFrame(reg_frame, text="Assign Agent ID", padding="10")
-        assign_frame.pack(fill=tk.X, padx=5, pady=5)
+        self.connections_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        conn_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        ttk.Label(assign_frame, text="Agent ID:").grid(row=0, column=0, sticky=tk.W, padx=5)
-        self.agent_id_entry = ttk.Entry(assign_frame, width=30)
-        self.agent_id_entry.grid(row=0, column=1, padx=5)
+        # Right panel - Registered Agents
+        right_frame = ttk.LabelFrame(main_paned, text="Registered Agents", padding="10")
+        main_paned.add(right_frame, weight=1)
 
-        ttk.Label(assign_frame, text="Session:").grid(row=0, column=2, sticky=tk.W, padx=(20,5))
-        self.assign_session_combo = ttk.Combobox(assign_frame, width=20, state="readonly")
-        self.assign_session_combo.grid(row=0, column=3, padx=5)
+        # Agent controls
+        agent_controls = ttk.Frame(right_frame)
+        agent_controls.pack(fill=tk.X, pady=(0, 10))
 
-        ttk.Label(assign_frame, text="Access Level:").grid(row=1, column=0, sticky=tk.W, padx=5)
-        self.access_level_combo = ttk.Combobox(assign_frame, width=30, state="readonly")
-        self.access_level_combo['values'] = ("self_only", "team_level", "session_level")
-        self.access_level_combo.set("self_only")  # Default
-        self.access_level_combo.grid(row=1, column=1, columnspan=2, padx=5, pady=5)
+        ttk.Button(agent_controls, text="Refresh Agents", command=self.refresh_agents).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Label(agent_controls, text="Filter:").pack(side=tk.LEFT, padx=(10, 5))
+        self.agent_filter = ttk.Entry(agent_controls, width=20)
+        self.agent_filter.pack(side=tk.LEFT, padx=(0, 5))
+        self.agent_filter.bind('<KeyRelease>', self.filter_agents)
 
-        ttk.Button(assign_frame, text="Assign Agent ID", command=self.assign_agent_id).grid(row=0, column=4, padx=10)
-        ttk.Button(assign_frame, text="Reject Registration", command=self.reject_registration).grid(row=0, column=5, padx=5)
+        # Agents treeview
+        self.agents_tree = ttk.Treeview(right_frame, columns=('permission_level', 'teams', 'connection_id'), height=15)
+        self.agents_tree.heading('#0', text='Agent ID')
+        self.agents_tree.heading('permission_level', text='Permission Level')
+        self.agents_tree.heading('teams', text='Teams')
+        self.agents_tree.heading('connection_id', text='Connection ID')
 
-        # Auto-refresh for pending agents
-        self.load_pending_agents()
+        # Column widths
+        self.agents_tree.column('#0', width=150)
+        self.agents_tree.column('permission_level', width=120)
+        self.agents_tree.column('teams', width=150)
+        self.agents_tree.column('connection_id', width=150)
+
+        # Scrollbar for agents
+        agent_scrollbar = ttk.Scrollbar(right_frame, orient=tk.VERTICAL, command=self.agents_tree.yview)
+        self.agents_tree.configure(yscrollcommand=agent_scrollbar.set)
+
+        self.agents_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        agent_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Initialize data
+        self.refresh_connections()
+        self.refresh_agents()
+
+    def refresh_connections(self):
+        """Refresh the connections list"""
+        try:
+            # Clear existing items
+            for item in self.connections_tree.get_children():
+                self.connections_tree.delete(item)
+
+            # Get active connections from the server
+            # For now, using placeholder data until we implement server API
+            connections = [
+                ("conn_001", "192.168.1.100", "2025-09-28 10:30:15"),
+                ("conn_002", "192.168.1.101", "2025-09-28 10:31:45"),
+                ("conn_003", "10.0.0.50", "2025-09-28 10:32:20"),
+            ]
+
+            for conn_id, ip_addr, timestamp in connections:
+                self.connections_tree.insert('', 'end', iid=conn_id, text=conn_id,
+                                            values=(ip_addr, timestamp, "Disconnect"))
+
+        except Exception as e:
+            logger.error(f"Failed to refresh connections: {e}")
+
+    def refresh_agents(self):
+        """Refresh the agents list"""
+        try:
+            # Clear existing items
+            for item in self.agents_tree.get_children():
+                self.agents_tree.delete(item)
+
+            # Get agents from database
+            with self.model.pool.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT DISTINCT a.assigned_agent_id, a.read_permission,
+                           GROUP_CONCAT(t.name) as teams, a.connection_id
+                    FROM agents a
+                    LEFT JOIN agent_teams at ON a.assigned_agent_id = at.agent_id
+                    LEFT JOIN teams t ON at.team_id = t.id
+                    WHERE a.assigned_agent_id IS NOT NULL
+                    GROUP BY a.assigned_agent_id
+                ''')
+
+                for agent_id, permission, teams, connection_id in cursor.fetchall():
+                    teams_str = teams if teams else ""
+                    conn_str = connection_id if connection_id else "Not Connected"
+                    self.agents_tree.insert('', 'end', iid=agent_id, text=agent_id,
+                                          values=(permission, teams_str, conn_str))
+
+        except Exception as e:
+            logger.error(f"Failed to refresh agents: {e}")
+
+    def filter_connections(self, event=None):
+        """Filter connections based on search text"""
+        filter_text = self.connection_filter.get().lower()
+        if not filter_text:
+            self.refresh_connections()
+            return
+
+        # Clear and repopulate with filtered results
+        for item in self.connections_tree.get_children():
+            self.connections_tree.delete(item)
+
+        # Re-add filtered items (placeholder implementation)
+        connections = [
+            ("conn_001", "192.168.1.100", "2025-09-28 10:30:15"),
+            ("conn_002", "192.168.1.101", "2025-09-28 10:31:45"),
+            ("conn_003", "10.0.0.50", "2025-09-28 10:32:20"),
+        ]
+
+        for conn_id, ip_addr, timestamp in connections:
+            if (filter_text in conn_id.lower() or
+                filter_text in ip_addr.lower()):
+                self.connections_tree.insert('', 'end', iid=conn_id, text=conn_id,
+                                           values=(ip_addr, timestamp, "Disconnect"))
+
+    def filter_agents(self, event=None):
+        """Filter agents based on search text"""
+        filter_text = self.agent_filter.get().lower()
+        if not filter_text:
+            self.refresh_agents()
+            return
+
+        # Clear and repopulate with filtered results
+        for item in self.agents_tree.get_children():
+            self.agents_tree.delete(item)
+
+        try:
+            with self.model.pool.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT DISTINCT a.assigned_agent_id, a.read_permission,
+                           GROUP_CONCAT(t.name) as teams, a.connection_id
+                    FROM agents a
+                    LEFT JOIN agent_teams at ON a.assigned_agent_id = at.agent_id
+                    LEFT JOIN teams t ON at.team_id = t.id
+                    WHERE a.assigned_agent_id IS NOT NULL
+                    AND (LOWER(a.assigned_agent_id) LIKE ? OR LOWER(a.read_permission) LIKE ? OR LOWER(t.name) LIKE ?)
+                    GROUP BY a.assigned_agent_id
+                ''', (f'%{filter_text}%', f'%{filter_text}%', f'%{filter_text}%'))
+
+                for agent_id, permission, teams, connection_id in cursor.fetchall():
+                    teams_str = teams if teams else ""
+                    conn_str = connection_id if connection_id else "Not Connected"
+                    self.agents_tree.insert('', 'end', iid=agent_id, text=agent_id,
+                                          values=(permission, teams_str, conn_str))
+        except Exception as e:
+            logger.error(f"Failed to filter agents: {e}")
 
     def load_pending_agents(self):
         """Load pending agent registrations"""
@@ -1201,8 +1296,6 @@ class PerformantMCPView:
 
                 conn.commit()
 
-                # Add to allowlist if enabled
-                self.ensure_agent_allowlisted(new_agent_id)
 
                 messagebox.showinfo("Success", f"Agent ID '{new_agent_id}' assigned successfully")
 
@@ -1312,124 +1405,6 @@ class PerformantMCPView:
         # Initial stats
         self.update_performance_stats()
 
-    def setup_admin_tab(self, notebook):
-        """Admin tab for managing agent allowlist"""
-        admin_frame = ttk.Frame(notebook)
-        notebook.add(admin_frame, text="Admin")
-
-        allow_frame = ttk.LabelFrame(admin_frame, text="Agent Allowlist", padding="10")
-        allow_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        # List of allowlisted agents
-        self.allowlist_var = tk.StringVar(value=self._read_allowlist_file())
-        self.allowlist_listbox = tk.Listbox(allow_frame, listvariable=self.allowlist_var, height=12, selectmode=tk.EXTENDED)
-        self.allowlist_listbox.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(0,10))
-
-        # Controls
-        ctrl_frame = ttk.Frame(allow_frame)
-        ctrl_frame.pack(side=tk.RIGHT, fill=tk.Y)
-
-        ttk.Button(ctrl_frame, text="Add Agent", command=self._admin_add_agent).pack(fill=tk.X, pady=5)
-        ttk.Button(ctrl_frame, text="Remove Selected", command=self._admin_remove_selected).pack(fill=tk.X, pady=5)
-        ttk.Button(ctrl_frame, text="Reload Allowlist", command=self._admin_reload_allowlist).pack(fill=tk.X, pady=5)
-        ttk.Button(ctrl_frame, text="Persist & Push", command=self._admin_persist_and_push).pack(fill=tk.X, pady=5)
-
-    def _read_allowlist_file(self):
-        try:
-            path = os.environ.get('MCP_AGENT_ALLOWLIST_FILE') or os.path.expanduser('~/.mcp_allowlist.txt')
-            items = []
-            if os.path.exists(path):
-                with open(path, 'r', encoding='utf-8') as fh:
-                    for ln in fh:
-                        ln = ln.strip()
-                        if ln and not ln.startswith('#'):
-                            items.append(ln)
-            return items
-        except Exception:
-            logger.exception("Failed to read allowlist file")
-            return []
-
-    def _write_allowlist_file(self, items):
-        try:
-            path = os.environ.get('MCP_AGENT_ALLOWLIST_FILE') or os.path.expanduser('~/.mcp_allowlist.txt')
-            with open(path, 'w', encoding='utf-8') as fh:
-                for it in items:
-                    fh.write(f"{it}\n")
-            logger.info("Persisted allowlist to %s", path)
-        except Exception:
-            logger.exception("Failed to persist allowlist file")
-
-    def _admin_add_agent(self):
-        name = simpledialog.askstring("Add Agent to Allowlist", "Agent ID:", parent=self.root)
-        if not name:
-            return
-        items = list(self.allowlist_var.get()) if isinstance(self.allowlist_var.get(), (list, tuple)) else list(self._read_allowlist_file())
-        if name in items:
-            messagebox.showinfo("Info", "Agent already in allowlist", parent=self.root)
-            return
-        items.append(name)
-        self.allowlist_var.set(items)
-        # Refresh the list to ensure accuracy
-        self._admin_reload_allowlist()
-
-    def _admin_remove_selected(self):
-        sel = self.allowlist_listbox.curselection()
-        if not sel:
-            messagebox.showinfo("No Selection", "Please select one or more agents to remove", parent=self.root)
-            return
-
-        items = list(self.allowlist_var.get()) if isinstance(self.allowlist_var.get(), (list, tuple)) else list(self._read_allowlist_file())
-
-        # Get selected items by index (in reverse order to avoid index shifting)
-        removed_items = []
-        for idx in reversed(sorted(sel)):
-            try:
-                if idx < len(items):
-                    removed_items.append(items.pop(idx))
-            except Exception:
-                logger.exception("Failed removing allowlist item at index %d", idx)
-
-        if removed_items:
-            self.allowlist_var.set(items)
-            # Refresh the list to ensure accuracy
-            self._admin_reload_allowlist()
-            removed_names = ", ".join(reversed(removed_items))
-            messagebox.showinfo("Removed", f"Removed {len(removed_items)} agent(s): {removed_names}", parent=self.root)
-        else:
-            messagebox.showerror("Error", "Failed to remove selected items", parent=self.root)
-
-    def _admin_reload_allowlist(self):
-        items = self._read_allowlist_file()
-        self.allowlist_var.set(items)
-        messagebox.showinfo("Reloaded", "Allowlist reloaded from file", parent=self.root)
-
-    def _admin_persist_and_push(self):
-        # Persist to file
-        items = list(self.allowlist_var.get()) if isinstance(self.allowlist_var.get(), (list, tuple)) else list(self._read_allowlist_file())
-        self._write_allowlist_file(items)
-
-        # Try to push to running server module
-        try:
-            import archive.multi_agent_mcp_server as multi_agent_mcp_server
-            if hasattr(multi_agent_mcp_server, 'AGENT_ALLOWLIST'):
-                try:
-                    multi_agent_mcp_server.AGENT_ALLOWLIST.clear()
-                    for it in items:
-                        multi_agent_mcp_server.AGENT_ALLOWLIST.add(it)
-                    messagebox.showinfo("Pushed", "Allowlist pushed to running server", parent=self.root)
-                    logger.info("Pushed allowlist to running server: %s", items)
-                except Exception:
-                    logger.exception("Failed to update running server AGENT_ALLOWLIST")
-                    messagebox.showerror("Error", "Failed to push allowlist to server (see logs)", parent=self.root)
-            else:
-                messagebox.showwarning("Warning", "Running server not detected in-process; changes persisted to file only", parent=self.root)
-        except ImportError:
-            # Using redesigned server - allowlist is file-based now
-            messagebox.showinfo("Updated", "Allowlist updated in file (redesigned server uses file-based allowlist)", parent=self.root)
-            logger.info("Allowlist updated in file for redesigned server: %s", items)
-        except Exception:
-            logger.exception("Failed to push allowlist to running server")
-            messagebox.showwarning("Warning", "Could not contact running server in-process; allowlist persisted to file", parent=self.root)
 
     def load_tree_children(self, parent_item):
         """Load children for tree item on demand"""
@@ -2095,11 +2070,6 @@ class PerformantMCPView:
 
             self.model.clear_cache()
             self.load_agent_data()
-            # Ensure GUI-created agents are allowlisted so they can announce
-            try:
-                self.ensure_agent_allowlisted(agent_id)
-            except Exception:
-                logger.exception("Failed to ensure agent allowlist update for %s", agent_id)
             messagebox.showinfo("Success", f"Agent '{name}' created")
 
         except sqlite3.IntegrityError:
