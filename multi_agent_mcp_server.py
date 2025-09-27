@@ -6,7 +6,7 @@ Provides:
 - WebSocket endpoint for AI clients to connect and send/receive MCP-style messages
 
 Run with:
-    uvicorn mcp_server:app --host 127.0.0.1 --port 8765
+    uvicorn multi_agent_mcp_server:app --host 127.0.0.1 --port 8765
 
 The server uses the same SQLite database file used by the GUI app
 ("multi-agent_mcp_context_manager.db"). No authentication is implemented by default.
@@ -25,7 +25,7 @@ from fastapi import Request, HTTPException
 import os
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("mcp_server")
+logger = logging.getLogger("multi_agent_mcp_server")
 
 app = FastAPI(title="MCP Server")
 DB_PATH = "multi-agent_mcp_context_manager.db"

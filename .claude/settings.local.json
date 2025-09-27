@@ -11,9 +11,17 @@
       "Bash(netstat:*)",
       "Bash(findstr:*)",
       "Bash(taskkill:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(del test_admin_bulk_remove.py test_admin_simple.py)",
+      "Bash(claude mcp:*)",
+      "Bash(F:/Python/Multi-Agent_MCP_GUI_Controller/.venv/Scripts/activate)"
     ],
     "deny": [],
     "ask": []
-  }
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "input=$(cat); cwd=\"$(echo \"$input\" | jq -r '.workspace.current_dir')\"; model=\"$(echo \"$input\" | jq -r '.model.display_name')\"; time=\"$(date +%H:%M:%S)\"; if [ -d \"$cwd/.git\" ]; then branch=\"$(git -C \"$cwd\" branch --show-current 2>/dev/null || echo 'detached')\"; printf \"\\033[2m%s \\033[36m%s\\033[0m \\033[32m[%s]\\033[0m \\033[33m%s\\033[0m\\n\" \"$time\" \"$model\" \"$branch\" \"$(basename \"$cwd\")\"; else printf \"\\033[2m%s \\033[36m%s\\033[0m \\033[33m%s\\033[0m\\n\" \"$time\" \"$model\" \"$(basename \"$cwd\")\"; fi"
+  },
+  "outputStyle": "default"
 }

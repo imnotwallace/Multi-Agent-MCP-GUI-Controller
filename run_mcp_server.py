@@ -7,9 +7,10 @@ Run with:
     python run_mcp_server.py
 
 """
+"""This file has been removed after migration."""
+import logging 
+from multi_agent_mcp_server import app
 import asyncio
-import logging
-from mcp_server import app
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("run_mcp_server")

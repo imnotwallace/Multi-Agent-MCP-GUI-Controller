@@ -113,7 +113,7 @@ class ContextRetriever:
         """
         Retrieve contexts based on agent's permission level
 
-        This replaces the vulnerable query in mcp_server.py lines 514-520
+    This replaces the vulnerable query in multi_agent_mcp_server.py lines 514-520
         """
         try:
             # Get agent permission info

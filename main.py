@@ -34,7 +34,7 @@ import os
 import urllib.request
 import urllib.error
 import uvicorn
-from mcp_server import app as mcp_app
+from multi_agent_mcp_server import app as mcp_app
 
 
 class ServerSubscriber:
@@ -1031,13 +1031,13 @@ class PerformantMCPView:
 
             # Try to update running server module's AGENT_ALLOWLIST if present
             try:
-                import mcp_server
-                if hasattr(mcp_server, 'AGENT_ALLOWLIST'):
+                import multi_agent_mcp_server
+                if hasattr(multi_agent_mcp_server, 'AGENT_ALLOWLIST'):
                     try:
-                        mcp_server.AGENT_ALLOWLIST.add(agent_id)
+                        multi_agent_mcp_server.AGENT_ALLOWLIST.add(agent_id)
                         logger.info("Added agent to running server allowlist: %s", agent_id)
                     except Exception:
-                        logger.exception("Failed updating mcp_server.AGENT_ALLOWLIST at runtime")
+                        logger.exception("Failed updating multi_agent_mcp_server.AGENT_ALLOWLIST at runtime")
             except Exception:
                 # Not fatal; server may not be running in same process
                 pass
@@ -1315,7 +1315,7 @@ class PerformantMCPView:
 
         # List of allowlisted agents
         self.allowlist_var = tk.StringVar(value=self._read_allowlist_file())
-        self.allowlist_listbox = tk.Listbox(allow_frame, listvariable=self.allowlist_var, height=12, selectmode=tk.SINGLE)
+        self.allowlist_listbox = tk.Listbox(allow_frame, listvariable=self.allowlist_var, height=12, selectmode=tk.EXTENDED)
         self.allowlist_listbox.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=(0,10))
 
         # Controls
@@ -1362,19 +1362,34 @@ class PerformantMCPView:
             return
         items.append(name)
         self.allowlist_var.set(items)
+        # Refresh the list to ensure accuracy
+        self._admin_reload_allowlist()
 
     def _admin_remove_selected(self):
         sel = self.allowlist_listbox.curselection()
         if not sel:
+            messagebox.showinfo("No Selection", "Please select one or more agents to remove", parent=self.root)
             return
-        idx = sel[0]
+
         items = list(self.allowlist_var.get()) if isinstance(self.allowlist_var.get(), (list, tuple)) else list(self._read_allowlist_file())
-        try:
-            removed = items.pop(idx)
+
+        # Get selected items by index (in reverse order to avoid index shifting)
+        removed_items = []
+        for idx in reversed(sorted(sel)):
+            try:
+                if idx < len(items):
+                    removed_items.append(items.pop(idx))
+            except Exception:
+                logger.exception("Failed removing allowlist item at index %d", idx)
+
+        if removed_items:
             self.allowlist_var.set(items)
-            messagebox.showinfo("Removed", f"Removed {removed} from allowlist", parent=self.root)
-        except Exception:
-            logger.exception("Failed removing selected allowlist item")
+            # Refresh the list to ensure accuracy
+            self._admin_reload_allowlist()
+            removed_names = ", ".join(reversed(removed_items))
+            messagebox.showinfo("Removed", f"Removed {len(removed_items)} agent(s): {removed_names}", parent=self.root)
+        else:
+            messagebox.showerror("Error", "Failed to remove selected items", parent=self.root)
 
     def _admin_reload_allowlist(self):
         items = self._read_allowlist_file()
@@ -1388,12 +1403,12 @@ class PerformantMCPView:
 
         # Try to push to running server module
         try:
-            import mcp_server
-            if hasattr(mcp_server, 'AGENT_ALLOWLIST'):
+            import multi_agent_mcp_server
+            if hasattr(multi_agent_mcp_server, 'AGENT_ALLOWLIST'):
                 try:
-                    mcp_server.AGENT_ALLOWLIST.clear()
+                    multi_agent_mcp_server.AGENT_ALLOWLIST.clear()
                     for it in items:
-                        mcp_server.AGENT_ALLOWLIST.add(it)
+                        multi_agent_mcp_server.AGENT_ALLOWLIST.add(it)
                     messagebox.showinfo("Pushed", "Allowlist pushed to running server", parent=self.root)
                     logger.info("Pushed allowlist to running server: %s", items)
                 except Exception:
