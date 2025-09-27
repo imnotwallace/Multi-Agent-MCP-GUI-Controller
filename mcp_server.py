@@ -169,7 +169,10 @@ class ConnectionManager:
         async with self.lock:
             ws = self.active_connections.pop(client_id, None)
             if ws:
-                await ws.close()
+                try:
+                    await ws.close()
+                except Exception:
+                    pass  # Ignore close errors as connection may already be closed
         logger.info(f"Client disconnected: {client_id}")
 
     async def send_json(self, client_id: str, message: Dict[str, Any]):
@@ -262,89 +265,450 @@ app = FastAPI(title="MCP Server", lifespan=lifespan)
 
 @app.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: str):
-    """Clients should connect to ws://host:port/ws/<client_id>
+    """Enhanced MCP endpoint with tool selection and registration workflow
 
-    A simple MCP message format (JSON) is expected, e.g.:
-    {"type": "announce", "agent_id": "agent_x", "capabilities": {...}}
-    {"type": "request_context", "session_id": "sess_proj_x_x", "max_tokens": 1024}
+    Expected message format: [agent, action, data]
 
-    The server will echo the message back and can be extended to broker messages between clients.
+    Initial workflow:
+    1. Agent connects and receives tool selection prompt
+    2. Agent responds with tool selection
+    3. If "register" selected, registration process begins
+    4. If "read" or "write" selected, agent must provide assigned_agent_id
     """
     await manager.connect(client_id, websocket)
+
+    # Send initial tool selection prompt
+    await manager.send_json(client_id, {
+        "type": "tool_selection_prompt",
+        "available_tools": ["register", "read", "write"],
+        "message": "Please select a tool to continue: register (new agent), read (read-only access), write (read-write access)"
+    })
+
     try:
         while True:
             data = await websocket.receive_text()
             try:
-                msg = json.loads(data)
+                # Parse new message schema [agent, action, data]
+                if data.startswith('[') and data.endswith(']'):
+                    msg_array = json.loads(data)
+                    if len(msg_array) == 3:
+                        agent, action, msg_data = msg_array
+                        msg = {"agent": agent, "action": action, "data": msg_data}
+                    else:
+                        raise ValueError("Invalid message format")
+                else:
+                    # Fallback for legacy messages
+                    msg = json.loads(data)
+                    # Convert to new format if possible
+                    if "agent_id" in msg:
+                        agent = msg.get("agent_id", client_id)
+                        action = msg.get("type", "unknown")
+                        msg = {"agent": agent, "action": action, "data": msg}
+                    else:
+                        msg = {"agent": client_id, "action": "legacy", "data": msg}
             except Exception:
-                msg = {"type": "raw", "payload": data}
+                msg = {"agent": client_id, "action": "raw", "data": {"payload": data}}
 
             logger.info(f"Received from {client_id}: {msg}")
 
-            # Very small example: if client asks for latest contexts for an agent
-            if isinstance(msg, dict) and msg.get("type") == "request_contexts":
-                agent_id = msg.get("agent_id")
-                limit = int(msg.get("limit", 5))
-                with get_connection() as conn:
-                    cur = conn.cursor()
-                    cur.execute(
-                        "SELECT id, title, created_at FROM contexts WHERE agent_id = ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?",
-                        (agent_id, limit),
-                    )
-                    rows = [dict(r) for r in cur.fetchall()]
-                await manager.send_json(client_id, {"type": "contexts", "agent_id": agent_id, "results": rows})
+            # Handle tool selection
+            if msg.get("action") == "select_tool":
+                await handle_tool_selection(client_id, websocket, msg)
                 continue
 
-            # Persist announce messages via the writer queue
-            if isinstance(msg, dict) and msg.get("type") == "announce":
-                agent_id = msg.get("agent_id")
-                name = msg.get("name") or msg.get("agent_id")
-
-                # Enforce allowlist if configured
-                if not _is_agent_allowed(agent_id):
-                    logger.info(f"Rejected announce from non-allowlisted agent: {agent_id}")
-                    try:
-                        await manager.send_json(client_id, {"type": "announce_rejected", "agent_id": agent_id, "reason": "not_allowlisted"})
-                    except Exception:
-                        pass
-                    # Close the websocket for this client
-                    try:
-                        await websocket.close()
-                    except Exception:
-                        pass
-                    await manager.disconnect(client_id)
-                    break
-
-                def upsert_agent(aid, aname):
-                    with get_connection() as conn:
-                        cur = conn.cursor()
-                        # Simple upsert: insert or update status/last_active
-                        cur.execute(
-                            "INSERT INTO agents (id, name, status, last_active) VALUES (?, ?, 'connected', ?)"
-                            " ON CONFLICT(id) DO UPDATE SET name=excluded.name, status='connected', last_active=excluded.last_active",
-                            (aid, aname, datetime.utcnow().isoformat()),
-                        )
-                        conn.commit()
-
-                # Enqueue and don't block other websocket operations while waiting
-                try:
-                    await enqueue_write(upsert_agent, agent_id, name)
-                except Exception as e:
-                    logger.exception(f"Failed to persist announce for {agent_id}: {e}")
-                # Also notify other clients about agent connect
-                await manager.broadcast({"type": "agent_status", "agent_id": agent_id, "status": "connected"})
-                # Echo acknowledgement
-                await manager.send_json(client_id, {"type": "announce_ack", "agent_id": agent_id})
+            # Handle registration process
+            if msg.get("action") == "register":
+                await handle_agent_registration(client_id, websocket, msg)
                 continue
 
-            # Echo back for now
+            # Handle authentication for existing agents
+            if msg.get("action") == "authenticate":
+                await handle_agent_authentication(client_id, websocket, msg)
+                continue
+
+            # Handle read/write operations
+            if msg.get("action") in ["read", "write"]:
+                await handle_agent_operation(client_id, websocket, msg)
+                continue
+
+            # Legacy support for announce messages
+            if msg.get("action") == "announce" or (isinstance(msg.get("data"), dict) and msg["data"].get("type") == "announce"):
+                await handle_legacy_announce(client_id, websocket, msg)
+                continue
+
+            # Handle context requests (legacy support)
+            if msg.get("action") == "request_contexts" or (isinstance(msg.get("data"), dict) and msg["data"].get("type") == "request_contexts"):
+                await handle_context_request(client_id, websocket, msg)
+                continue
+
+            # Echo for unhandled messages
             await manager.send_json(client_id, {"type": "echo", "original": msg})
 
     except WebSocketDisconnect:
-        await manager.disconnect(client_id)
+        await handle_agent_disconnect(client_id)
     except Exception as e:
         logger.exception(f"WebSocket error for {client_id}: {e}")
         await manager.disconnect(client_id)
+
+async def handle_tool_selection(client_id: str, websocket: WebSocket, msg: dict):
+    """Handle agent tool selection"""
+    selected_tool = msg.get("data", {}).get("tool")
+    agent_name = msg.get("data", {}).get("name", f"Agent_{client_id}")
+
+    if selected_tool not in ["register", "read", "write"]:
+        await manager.send_json(client_id, {
+            "type": "error",
+            "message": "Invalid tool selection. Must be 'register', 'read', or 'write'"
+        })
+        return
+
+    if selected_tool == "register":
+        # Start registration process
+        await handle_agent_registration(client_id, websocket, msg)
+    else:
+        # For read/write, require existing agent_id
+        await manager.send_json(client_id, {
+            "type": "agent_id_required",
+            "message": f"To use '{selected_tool}' tool, provide your assigned agent_id",
+            "expected_format": f'["{client_id}", "authenticate", {{"agent_id": "your_assigned_id"}}]'
+        })
+
+async def handle_agent_registration(client_id: str, websocket: WebSocket, msg: dict):
+    """Handle new agent registration"""
+    agent_name = msg.get("data", {}).get("name", f"Agent_{client_id}")
+    capabilities = msg.get("data", {}).get("capabilities", {})
+
+    def create_pending_agent(name: str, connection_id: str, caps: dict):
+        with get_connection() as conn:
+            cur = conn.cursor()
+            agent_id = f"pending_{connection_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+            cur.execute(
+                """INSERT INTO agents
+                   (id, name, connection_id, registration_status, selected_tool, capabilities, status, last_active, access_level, permission_granted_at)
+                   VALUES (?, ?, ?, 'pending', 'register', ?, 'connected', ?, 'self_only', ?)""",
+                (agent_id, name, connection_id, json.dumps(caps), datetime.utcnow().isoformat(), datetime.utcnow().isoformat())
+            )
+            conn.commit()
+            return agent_id
+
+    try:
+        agent_id = await enqueue_write(create_pending_agent, agent_name, client_id, capabilities)
+        await manager.send_json(client_id, {
+            "type": "registration_success",
+            "agent_id": agent_id,
+            "status": "pending",
+            "message": "Registration successful. Waiting for human assignment of permanent agent_id."
+        })
+
+        # Notify GUI of new pending agent
+        await manager.broadcast({
+            "type": "new_pending_agent",
+            "agent_id": agent_id,
+            "name": agent_name,
+            "connection_id": client_id
+        })
+
+    except Exception as e:
+        logger.exception(f"Registration failed for {client_id}: {e}")
+        await manager.send_json(client_id, {
+            "type": "error",
+            "message": "Registration failed"
+        })
+
+async def handle_agent_authentication(client_id: str, websocket: WebSocket, msg: dict):
+    """Handle agent authentication with assigned agent_id"""
+    assigned_agent_id = msg.get("data", {}).get("agent_id")
+
+    if not assigned_agent_id:
+        await manager.send_json(client_id, {
+            "type": "error",
+            "message": "agent_id required for authentication"
+        })
+        return
+
+    # Verify agent exists and is assigned
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT registration_status, selected_tool, name FROM agents WHERE assigned_agent_id = ? AND deleted_at IS NULL",
+            (assigned_agent_id,)
+        )
+        result = cur.fetchone()
+
+        if not result:
+            await manager.send_json(client_id, {
+                "type": "error",
+                "message": "Invalid agent_id or agent not found"
+            })
+            return
+
+        if result[0] != "assigned":
+            await manager.send_json(client_id, {
+                "type": "error",
+                "message": "Agent not yet assigned by human administrator"
+            })
+            return
+
+        # Update connection status
+        cur.execute(
+            "UPDATE agents SET status = 'connected', last_active = ?, connection_id = ? WHERE assigned_agent_id = ?",
+            (datetime.utcnow().isoformat(), client_id, assigned_agent_id)
+        )
+        conn.commit()
+
+        await manager.send_json(client_id, {
+            "type": "authentication_success",
+            "agent_id": assigned_agent_id,
+            "agent_name": result[2],
+            "tool": result[1],
+            "message": f"Authentication successful. You can now use {result[1]} operations."
+        })
+
+async def handle_agent_operation(client_id: str, websocket: WebSocket, msg: dict):
+    """Handle read/write operations from authenticated agents"""
+    assigned_agent_id = msg.get("data", {}).get("agent_id") or msg.get("agent")
+    action = msg.get("action")
+
+    if not assigned_agent_id:
+        await manager.send_json(client_id, {
+            "type": "error",
+            "message": "agent_id required for read/write operations"
+        })
+        return
+
+    # Verify agent exists and is assigned
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT registration_status, selected_tool FROM agents WHERE assigned_agent_id = ? AND deleted_at IS NULL",
+            (assigned_agent_id,)
+        )
+        result = cur.fetchone()
+
+        if not result:
+            await manager.send_json(client_id, {
+                "type": "error",
+                "message": "Invalid agent_id or agent not found"
+            })
+            return
+
+        if result[0] != "assigned":
+            await manager.send_json(client_id, {
+                "type": "error",
+                "message": "Agent not yet assigned by human administrator"
+            })
+            return
+
+    # Handle specific operations based on action
+    if action == "read":
+        await handle_read_operation(client_id, assigned_agent_id, msg.get("data", {}))
+    elif action == "write":
+        await handle_write_operation(client_id, assigned_agent_id, msg.get("data", {}))
+
+async def handle_read_operation(client_id: str, agent_id: str, data: dict):
+    """Handle read operations with permission-aware context retrieval"""
+    resource_type = data.get("resource_type", "contexts")
+    limit = data.get("limit", 10)
+
+    with get_connection() as conn:
+        cur = conn.cursor()
+        if resource_type == "contexts":
+            # First get the requesting agent's information and access level
+            cur.execute(
+                """SELECT a.id, a.access_level, a.session_id, a.team_id
+                   FROM agents a
+                   WHERE a.assigned_agent_id = ? AND a.deleted_at IS NULL""",
+                (agent_id,)
+            )
+            agent_info = cur.fetchone()
+
+            if not agent_info:
+                await manager.send_json(client_id, {
+                    "type": "error",
+                    "message": "Agent not found or not authorized",
+                    "access_level": None
+                })
+                return
+
+            requesting_agent_id, access_level, session_id, team_id = agent_info
+
+            # Build query based on access level
+            if access_level == "session_level":
+                # Can read contexts from all agents in the session
+                query = """
+                    SELECT c.id, c.title, c.content, c.created_at, c.agent_id
+                    FROM contexts c
+                    JOIN agents a ON c.agent_id = a.id
+                    WHERE a.session_id = ? AND c.deleted_at IS NULL
+                    ORDER BY c.created_at DESC LIMIT ?
+                """
+                params = (session_id, limit)
+            elif access_level == "team_level" and team_id:
+                # Can read contexts from agents in the same team within the session
+                query = """
+                    SELECT c.id, c.title, c.content, c.created_at, c.agent_id
+                    FROM contexts c
+                    JOIN agents a ON c.agent_id = a.id
+                    WHERE a.team_id = ? AND a.session_id = ? AND c.deleted_at IS NULL
+                    ORDER BY c.created_at DESC LIMIT ?
+                """
+                params = (team_id, session_id, limit)
+            else:
+                # Default: self_only - can only read own contexts
+                query = """
+                    SELECT c.id, c.title, c.content, c.created_at, c.agent_id
+                    FROM contexts c
+                    WHERE c.agent_id = ? AND c.deleted_at IS NULL
+                    ORDER BY c.created_at DESC LIMIT ?
+                """
+                params = (requesting_agent_id, limit)
+
+            cur.execute(query, params)
+            results = [dict(r) for r in cur.fetchall()]
+
+            await manager.send_json(client_id, {
+                "type": "read_response",
+                "resource_type": resource_type,
+                "access_level": access_level,
+                "data": results,
+                "count": len(results)
+            })
+
+async def handle_write_operation(client_id: str, agent_id: str, data: dict):
+    """Handle write operations"""
+    resource_type = data.get("resource_type", "contexts")
+    content = data.get("content", {})
+
+    if resource_type == "contexts":
+        def write_context():
+            with get_connection() as conn:
+                cur = conn.cursor()
+                # Get agent's session
+                cur.execute(
+                    "SELECT session_id, project_id FROM agents a JOIN sessions s ON a.session_id = s.id WHERE a.assigned_agent_id = ?",
+                    (agent_id,)
+                )
+                result = cur.fetchone()
+                if not result:
+                    raise ValueError("Agent not assigned to a session")
+
+                session_id, project_id = result
+                context_id = f"ctx_{session_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')}"
+
+                cur.execute(
+                    """INSERT INTO contexts (id, title, content, project_id, session_id, agent_id, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (context_id, content.get("title", ""), content.get("content", ""),
+                     project_id, session_id, agent_id, datetime.utcnow().isoformat())
+                )
+                conn.commit()
+                return context_id
+
+        try:
+            context_id = await enqueue_write(write_context)
+            await manager.send_json(client_id, {
+                "type": "write_response",
+                "resource_type": resource_type,
+                "context_id": context_id,
+                "status": "success"
+            })
+        except Exception as e:
+            await manager.send_json(client_id, {
+                "type": "error",
+                "message": f"Write operation failed: {str(e)}"
+            })
+
+async def handle_legacy_announce(client_id: str, websocket: WebSocket, msg: dict):
+    """Handle legacy announce messages for backward compatibility"""
+    data = msg.get("data", {}) if isinstance(msg.get("data"), dict) else msg
+    agent_id = data.get("agent_id")
+    name = data.get("name") or agent_id
+
+    if not agent_id:
+        await manager.send_json(client_id, {
+            "type": "error",
+            "message": "agent_id required for announce"
+        })
+        return
+
+    # Enforce allowlist if configured
+    if not _is_agent_allowed(agent_id):
+        logger.info(f"Rejected announce from non-allowlisted agent: {agent_id}")
+        await manager.send_json(client_id, {
+            "type": "announce_rejected",
+            "agent_id": agent_id,
+            "reason": "not_allowlisted"
+        })
+        await websocket.close()
+        await manager.disconnect(client_id)
+        return
+
+    def upsert_agent(aid, aname):
+        with get_connection() as conn:
+            cur = conn.cursor()
+            # Legacy agents get assigned status with their ID as assigned_agent_id
+            cur.execute(
+                """INSERT INTO agents (id, name, status, last_active, registration_status, selected_tool, assigned_agent_id, access_level, permission_granted_at)
+                   VALUES (?, ?, 'connected', ?, 'assigned', 'write', ?, 'self_only', ?)
+                   ON CONFLICT(name) DO UPDATE SET
+                   status='connected',
+                   last_active=excluded.last_active,
+                   connection_id=?""",
+                (aid, aname, datetime.utcnow().isoformat(), aid, datetime.utcnow().isoformat(), client_id)
+            )
+            conn.commit()
+
+    try:
+        await enqueue_write(upsert_agent, agent_id, name)
+        await manager.broadcast({"type": "agent_status", "agent_id": agent_id, "status": "connected"})
+        await manager.send_json(client_id, {"type": "announce_ack", "agent_id": agent_id})
+    except Exception as e:
+        logger.exception(f"Failed to persist announce for {agent_id}: {e}")
+
+async def handle_context_request(client_id: str, websocket: WebSocket, msg: dict):
+    """Handle context requests for backward compatibility"""
+    data = msg.get("data", {}) if isinstance(msg.get("data"), dict) else msg
+    agent_id = data.get("agent_id")
+    limit = int(data.get("limit", 5))
+
+    if not agent_id:
+        await manager.send_json(client_id, {
+            "type": "error",
+            "message": "agent_id required for context request"
+        })
+        return
+
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, title, created_at FROM contexts WHERE agent_id = ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ?",
+            (agent_id, limit),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    await manager.send_json(client_id, {"type": "contexts", "agent_id": agent_id, "results": rows})
+
+async def handle_agent_disconnect(client_id: str):
+    """Handle agent disconnection with proper cleanup"""
+    def update_agent_status():
+        with get_connection() as conn:
+            cur = conn.cursor()
+            # Update status and clear connection_id for proper cleanup
+            cur.execute(
+                "UPDATE agents SET status = 'disconnected', last_active = ?, connection_id = NULL WHERE connection_id = ?",
+                (datetime.utcnow().isoformat(), client_id)
+            )
+            conn.commit()
+
+    try:
+        await enqueue_write(update_agent_status)
+        logger.info(f"Updated disconnect status for client {client_id}")
+    except Exception:
+        logger.exception(f"Failed to update disconnect status for {client_id}")
+
+    try:
+        await manager.disconnect(client_id)
+    except Exception:
+        logger.exception(f"Failed to disconnect client {client_id} from manager")
 
 # Health check
 @app.get("/healthz")

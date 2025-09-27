@@ -4,7 +4,10 @@
       "Bash(sqlite3:*)",
       "Bash(python:*)",
       "Bash(echo $SHELL)",
-      "Bash(source:*)"
+      "Bash(source:*)",
+      "Bash(pip install:*)",
+      "Bash(curl http://127.0.0.1:8765/healthz)",
+      "Bash(find:*)"
     ],
     "deny": [],
     "ask": []

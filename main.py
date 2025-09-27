@@ -505,8 +505,72 @@ class CachedMCPDataModel:
                 last_active TIMESTAMP,
                 updated_at TIMESTAMP,
                 deleted_at TIMESTAMP,
+                registration_status TEXT DEFAULT 'assigned',
+                selected_tool TEXT DEFAULT 'write',
+                assigned_agent_id TEXT,
+                connection_id TEXT,
+                capabilities TEXT DEFAULT '{}',
+                access_level TEXT DEFAULT 'self_only' CHECK (access_level IN ('self_only', 'team_level', 'session_level')),
+                permission_granted_by TEXT,
+                permission_granted_at TIMESTAMP,
+                permission_expires_at TIMESTAMP,
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL,
                 FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE SET NULL
+            )''')
+
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS contexts (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                content TEXT,
+                project_id TEXT,
+                session_id TEXT,
+                agent_id TEXT,
+                sequence_number INTEGER,
+                metadata TEXT,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP,
+                deleted_at TIMESTAMP,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+            )''')
+
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS agent_tools (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                permissions TEXT,
+                enabled BOOLEAN DEFAULT 1,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP
+            )''')
+
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS agent_permission_history (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                old_access_level TEXT,
+                new_access_level TEXT NOT NULL,
+                granted_by TEXT NOT NULL,
+                reason TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+            )''')
+
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS permission_rules (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                team_id TEXT,
+                default_access_level TEXT DEFAULT 'self_only',
+                auto_grant_team_level BOOLEAN DEFAULT 0,
+                auto_grant_session_level BOOLEAN DEFAULT 0,
+                created_by TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+                FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE
             )''')
 
             # Performance indexes
@@ -518,6 +582,11 @@ class CachedMCPDataModel:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(deleted_at)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_agents_active ON agents(deleted_at)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_teams_active ON teams(deleted_at)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_agents_registration_status ON agents(registration_status)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_agents_assigned_agent_id ON agents(assigned_agent_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_agents_connection_id ON agents(connection_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_agent_recent ON contexts(agent_id, created_at DESC)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_session_recent ON contexts(session_id, created_at DESC)')
 
             conn.commit()
             logger.info("Database initialized with performance optimizations")
@@ -609,7 +678,11 @@ class CachedMCPDataModel:
             for row in cursor.fetchall():
                 agents[row[0]] = {
                     'id': row[0], 'name': row[1], 'session_id': row[2],
-                    'team_id': row[3], 'status': row[4], 'last_active': row[5]
+                    'team_id': row[3], 'status': row[4], 'last_active': row[5],
+                    'updated_at': row[6], 'deleted_at': row[7],
+                    'registration_status': row[8], 'selected_tool': row[9],
+                    'assigned_agent_id': row[10], 'connection_id': row[11],
+                    'capabilities': row[12]
                 }
 
             self.agents_cache[cache_key] = agents
@@ -792,6 +865,7 @@ class PerformantMCPView:
 
         self.setup_project_view(notebook)
         self.setup_agent_management(notebook)
+        self.setup_agent_registration(notebook)
         self.setup_team_management(notebook)
         self.setup_performance_monitor(notebook)
         # Admin tab for allowlist management
@@ -882,19 +956,22 @@ class PerformantMCPView:
         list_frame = ttk.LabelFrame(agent_frame, text="Agents", padding="10")
         list_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Agent treeview with checkboxes (multi-select)
-        self.agent_tree = ttk.Treeview(list_frame, columns=('name', 'session', 'team', 'status'),
+        # Agent treeview with registration status and access levels
+        self.agent_tree = ttk.Treeview(list_frame, columns=('name', 'assigned_id', 'registration_status', 'access_level', 'session', 'team', 'status'),
                                       selectmode='extended', height=15)
-        self.agent_tree.heading('#0', text='Select')
+        self.agent_tree.heading('#0', text='Temp ID')
         self.agent_tree.heading('name', text='Name', command=lambda: self.sort_agents('name'))
+        self.agent_tree.heading('assigned_id', text='Assigned ID', command=lambda: self.sort_agents('assigned_id'))
+        self.agent_tree.heading('registration_status', text='Registration', command=lambda: self.sort_agents('registration_status'))
+        self.agent_tree.heading('access_level', text='Access Level', command=lambda: self.sort_agents('access_level'))
         self.agent_tree.heading('session', text='Session', command=lambda: self.sort_agents('session'))
         self.agent_tree.heading('team', text='Team', command=lambda: self.sort_agents('team'))
         self.agent_tree.heading('status', text='Status', command=lambda: self.sort_agents('status'))
 
         # Column widths
-        self.agent_tree.column('#0', width=60)
-        for col in ('name', 'session', 'team', 'status'):
-            self.agent_tree.column(col, width=120)
+        self.agent_tree.column('#0', width=120)
+        for col in ('name', 'assigned_id', 'registration_status', 'access_level', 'session', 'team', 'status'):
+            self.agent_tree.column(col, width=100)
 
         self.agent_tree.pack(fill=tk.BOTH, expand=True, pady=5)
         self.agent_tree.bind('<Double-1>', self.rename_agent_dialog)
@@ -966,6 +1043,208 @@ class PerformantMCPView:
                 pass
         except Exception:
             logger.exception("ensure_agent_allowlisted failed for %s", agent_id)
+
+    def setup_agent_registration(self, notebook):
+        """Agent registration and assignment interface"""
+        reg_frame = ttk.Frame(notebook)
+        notebook.add(reg_frame, text="Agent Registration")
+
+        # Pending agents section
+        pending_frame = ttk.LabelFrame(reg_frame, text="Pending Agent Registrations", padding="10")
+        pending_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # Pending agents treeview
+        self.pending_tree = ttk.Treeview(pending_frame, columns=('name', 'connection_id', 'registered_at', 'capabilities'),
+                                       selectmode='single', height=10)
+        self.pending_tree.heading('#0', text='Temp ID')
+        self.pending_tree.heading('name', text='Agent Name')
+        self.pending_tree.heading('connection_id', text='Connection ID')
+        self.pending_tree.heading('registered_at', text='Registered At')
+        self.pending_tree.heading('capabilities', text='Capabilities')
+
+        # Column widths
+        self.pending_tree.column('#0', width=150)
+        for col in ('name', 'connection_id', 'registered_at', 'capabilities'):
+            self.pending_tree.column(col, width=120)
+
+        self.pending_tree.pack(fill=tk.BOTH, expand=True, pady=5)
+
+        # Assignment interface
+        assign_frame = ttk.LabelFrame(reg_frame, text="Assign Agent ID", padding="10")
+        assign_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        ttk.Label(assign_frame, text="Agent ID:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        self.agent_id_entry = ttk.Entry(assign_frame, width=30)
+        self.agent_id_entry.grid(row=0, column=1, padx=5)
+
+        ttk.Label(assign_frame, text="Session:").grid(row=0, column=2, sticky=tk.W, padx=(20,5))
+        self.assign_session_combo = ttk.Combobox(assign_frame, width=20, state="readonly")
+        self.assign_session_combo.grid(row=0, column=3, padx=5)
+
+        ttk.Label(assign_frame, text="Access Level:").grid(row=1, column=0, sticky=tk.W, padx=5)
+        self.access_level_combo = ttk.Combobox(assign_frame, width=30, state="readonly")
+        self.access_level_combo['values'] = ("self_only", "team_level", "session_level")
+        self.access_level_combo.set("self_only")  # Default
+        self.access_level_combo.grid(row=1, column=1, columnspan=2, padx=5, pady=5)
+
+        ttk.Button(assign_frame, text="Assign Agent ID", command=self.assign_agent_id).grid(row=0, column=4, padx=10)
+        ttk.Button(assign_frame, text="Reject Registration", command=self.reject_registration).grid(row=0, column=5, padx=5)
+
+        # Auto-refresh for pending agents
+        self.load_pending_agents()
+
+    def load_pending_agents(self):
+        """Load pending agent registrations"""
+        try:
+            # Clear existing items
+            for item in self.pending_tree.get_children():
+                self.pending_tree.delete(item)
+
+            # Load pending agents
+            with self.model.pool.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT id, name, connection_id, last_active, capabilities
+                    FROM agents
+                    WHERE registration_status = 'pending' AND deleted_at IS NULL
+                    ORDER BY last_active DESC
+                ''')
+
+                pending_agents = cursor.fetchall()
+
+                for agent in pending_agents:
+                    agent_id, name, conn_id, registered_at, capabilities = agent
+                    caps_display = json.loads(capabilities or '{}')
+                    caps_str = ', '.join(caps_display.keys()) if caps_display else 'None'
+
+                    self.pending_tree.insert('', tk.END, text=agent_id,
+                                           values=(name, conn_id, registered_at, caps_str))
+
+            # Load available sessions for assignment
+            sessions = self.model.get_sessions()
+            session_options = [f"{s['name']} ({s['project_id']})" for s in sessions.values()]
+            self.assign_session_combo['values'] = session_options
+
+        except Exception as e:
+            logger.error(f"Failed to load pending agents: {e}")
+
+    def assign_agent_id(self):
+        """Assign permanent agent ID to selected pending agent"""
+        selected = self.pending_tree.selection()
+        if not selected:
+            messagebox.showwarning("Warning", "Please select a pending agent")
+            return
+
+        temp_id = self.pending_tree.item(selected[0])['text']
+        new_agent_id = self.agent_id_entry.get().strip()
+        selected_session = self.assign_session_combo.get()
+        access_level = self.access_level_combo.get()
+
+        if not new_agent_id:
+            messagebox.showwarning("Warning", "Please enter an agent ID")
+            return
+
+        if not selected_session:
+            messagebox.showwarning("Warning", "Please select a session")
+            return
+
+        if not access_level:
+            messagebox.showwarning("Warning", "Please select an access level")
+            return
+
+        # Extract session ID from selection
+        session_name = selected_session.split(' (')[0]
+        sessions = self.model.get_sessions()
+        session_id = None
+        for sid, session in sessions.items():
+            if session['name'] == session_name:
+                session_id = sid
+                break
+
+        if not session_id:
+            messagebox.showerror("Error", "Invalid session selection")
+            return
+
+        try:
+            with self.model.pool.get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Check if agent ID already exists
+                cursor.execute("SELECT id FROM agents WHERE assigned_agent_id = ? AND deleted_at IS NULL", (new_agent_id,))
+                if cursor.fetchone():
+                    messagebox.showerror("Error", f"Agent ID '{new_agent_id}' already exists")
+                    return
+
+                # Update the pending agent
+                cursor.execute('''
+                    UPDATE agents
+                    SET assigned_agent_id = ?, registration_status = 'assigned', session_id = ?,
+                        access_level = ?, permission_granted_by = 'GUI Admin', permission_granted_at = ?, updated_at = ?
+                    WHERE id = ?
+                ''', (new_agent_id, session_id, access_level, datetime.now().isoformat(), datetime.now().isoformat(), temp_id))
+
+                # Create audit entry for permission assignment
+                audit_id = f"audit_{temp_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                cursor.execute('''
+                    INSERT INTO agent_permission_history
+                    (id, agent_id, old_access_level, new_access_level, granted_by, reason, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (audit_id, temp_id, 'self_only', access_level, 'GUI Admin',
+                      f'Agent assignment with ID: {new_agent_id}', datetime.now().isoformat()))
+
+                conn.commit()
+
+                # Add to allowlist if enabled
+                self.ensure_agent_allowlisted(new_agent_id)
+
+                messagebox.showinfo("Success", f"Agent ID '{new_agent_id}' assigned successfully")
+
+                # Refresh displays
+                self.load_pending_agents()
+                self.load_agent_data()
+
+                # Notify the agent via WebSocket if server is available
+                self.notify_agent_assignment(temp_id, new_agent_id)
+
+        except Exception as e:
+            logger.error(f"Failed to assign agent ID: {e}")
+            messagebox.showerror("Error", f"Failed to assign agent ID: {e}")
+
+    def reject_registration(self):
+        """Reject pending agent registration"""
+        selected = self.pending_tree.selection()
+        if not selected:
+            messagebox.showwarning("Warning", "Please select a pending agent")
+            return
+
+        temp_id = self.pending_tree.item(selected[0])['text']
+
+        if messagebox.askyesno("Confirm", "Are you sure you want to reject this registration?"):
+            try:
+                with self.model.pool.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE agents SET deleted_at = ? WHERE id = ?",
+                        (datetime.now().isoformat(), temp_id)
+                    )
+                    conn.commit()
+
+                messagebox.showinfo("Success", "Registration rejected")
+                self.load_pending_agents()
+
+            except Exception as e:
+                logger.error(f"Failed to reject registration: {e}")
+                messagebox.showerror("Error", f"Failed to reject registration: {e}")
+
+    def notify_agent_assignment(self, temp_id: str, assigned_agent_id: str):
+        """Notify agent of successful assignment via WebSocket"""
+        try:
+            if self.server_subscriber and hasattr(self.server_subscriber, 'send_message'):
+                # This would require implementing a way to send messages back to the server
+                # For now, this is a placeholder for future implementation
+                pass
+        except Exception:
+            logger.debug("Could not notify agent of assignment (normal if server not accessible)")
 
     def setup_team_management(self, notebook):
         """Team management interface"""
@@ -2102,7 +2381,15 @@ class PerformantMCPView:
                         team_name = team['name']
 
                 self.agent_tree.insert('', tk.END, text=agent_id,
-                                     values=(agent['name'], session_name, team_name, agent['status']))
+                                     values=(
+                                         agent['name'],
+                                         agent.get('assigned_agent_id', 'N/A'),
+                                         agent.get('registration_status', 'unknown'),
+                                         agent.get('access_level', 'self_only'),
+                                         session_name,
+                                         team_name,
+                                         agent['status']
+                                     ))
 
             logger.info(f"Loaded {len(agents)} agents")
 
