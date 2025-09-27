@@ -170,7 +170,9 @@ class ConnectionManager:
             ws = self.active_connections.pop(client_id, None)
             if ws:
                 try:
-                    await ws.close()
+                    # Check if the connection is still open before attempting to close
+                    if not ws.client_state.name == 'DISCONNECTED':
+                        await ws.close()
                 except Exception:
                     pass  # Ignore close errors as connection may already be closed
         logger.info(f"Client disconnected: {client_id}")
@@ -382,11 +384,15 @@ async def handle_agent_registration(client_id: str, websocket: WebSocket, msg: d
         with get_connection() as conn:
             cur = conn.cursor()
             agent_id = f"pending_{connection_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+            timestamp = datetime.utcnow().strftime('%H%M%S')
+            unique_name = f"{name}_{timestamp}"
+
+            # Use INSERT OR REPLACE to handle duplicate names
             cur.execute(
-                """INSERT INTO agents
+                """INSERT OR REPLACE INTO agents
                    (id, name, connection_id, registration_status, selected_tool, capabilities, status, last_active, access_level, permission_granted_at)
                    VALUES (?, ?, ?, 'pending', 'register', ?, 'connected', ?, 'self_only', ?)""",
-                (agent_id, name, connection_id, json.dumps(caps), datetime.utcnow().isoformat(), datetime.utcnow().isoformat())
+                (agent_id, unique_name, connection_id, json.dumps(caps), datetime.utcnow().isoformat(), datetime.utcnow().isoformat())
             )
             conn.commit()
             return agent_id

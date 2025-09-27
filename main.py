@@ -1055,7 +1055,7 @@ class PerformantMCPView:
 
         # Pending agents treeview
         self.pending_tree = ttk.Treeview(pending_frame, columns=('name', 'connection_id', 'registered_at', 'capabilities'),
-                                       selectmode='single', height=10)
+                                       height=10)
         self.pending_tree.heading('#0', text='Temp ID')
         self.pending_tree.heading('name', text='Agent Name')
         self.pending_tree.heading('connection_id', text='Connection ID')
