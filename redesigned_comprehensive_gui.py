@@ -302,7 +302,7 @@ class ConnectionAssignmentTab:
             left_frame,
             columns=columns,
             show='tree headings',
-            height=15
+            height=18
         )
 
         # Configure columns
@@ -366,7 +366,7 @@ class ConnectionAssignmentTab:
             right_frame,
             columns=columns,
             show='tree headings',
-            height=15
+            height=18
         )
 
         # Configure columns
@@ -493,7 +493,7 @@ class ConnectionAssignmentTab:
                 text=str(i),
                 values=(
                     agent.get("agent_id"),
-                    agent.get("permission_level", "guest"),
+                    agent.get("permission_level", "self"),
                     teams_str,
                     f"{status_icon} {agent.get('connection_id', 'Not Connected')}"
                 )
@@ -501,23 +501,43 @@ class ConnectionAssignmentTab:
 
     def filter_connections(self, *args):
         """Filter connections based on search text"""
-        # This would implement filtering logic
-        pass
+        filter_text = self.connection_filter_var.get().lower()
+        self.refresh_connections()  # For now, just refresh - could implement actual filtering
 
     def filter_agents(self, *args):
         """Filter agents based on search text"""
-        # This would implement filtering logic
-        pass
+        filter_text = self.agent_filter_var.get().lower()
+        self.refresh_agents()  # For now, just refresh - could implement actual filtering
 
     def sort_connections(self, column):
         """Sort connections by column"""
-        # This would implement sorting logic
-        pass
+        # Get current items from tree
+        items = [(self.connections_tree.set(child, column), child) for child in self.connections_tree.get_children('')]
+
+        # Sort items
+        items.sort(reverse=getattr(self, f'_reverse_connections_{column}', False))
+
+        # Rearrange items in sorted order
+        for index, (val, child) in enumerate(items):
+            self.connections_tree.move(child, '', index)
+
+        # Toggle sort direction for next click
+        setattr(self, f'_reverse_connections_{column}', not getattr(self, f'_reverse_connections_{column}', False))
 
     def sort_agents(self, column):
         """Sort agents by column"""
-        # This would implement sorting logic
-        pass
+        # Get current items from tree
+        items = [(self.agents_tree.set(child, column), child) for child in self.agents_tree.get_children('')]
+
+        # Sort items
+        items.sort(reverse=getattr(self, f'_reverse_agents_{column}', False))
+
+        # Rearrange items in sorted order
+        for index, (val, child) in enumerate(items):
+            self.agents_tree.move(child, '', index)
+
+        # Toggle sort direction for next click
+        setattr(self, f'_reverse_agents_{column}', not getattr(self, f'_reverse_agents_{column}', False))
 
     def disconnect_connection(self):
         """Disconnect selected connection"""
@@ -528,8 +548,16 @@ class ConnectionAssignmentTab:
 
         connection_id = self.connections_tree.item(selection[0])['values'][0]
         if messagebox.askyesno("Confirm", f"Disconnect connection {connection_id}?"):
-            # Implementation would go here
-            messagebox.showinfo("Info", f"Connection {connection_id} disconnected")
+            try:
+                # Update connection status in database
+                self.db_manager.execute_update(
+                    "UPDATE connections SET status = 'disconnected', assigned_agent_id = NULL WHERE connection_id = ?",
+                    (connection_id,)
+                )
+                self.refresh_connections()
+                messagebox.showinfo("Success", f"Connection {connection_id} disconnected")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to disconnect: {e}")
 
 class AgentManagementTab:
     """Enhanced Agent Management with all specified functionality"""
@@ -741,7 +769,7 @@ class AgentManagementTab:
 
     def add_agent(self):
         """Add a new agent with permission level and teams"""
-        dialog = AgentCreateDialog(self.frame)
+        dialog = AgentCreateDialog(self.frame, self.db_manager)
         result = dialog.show()
 
         if result:
@@ -793,13 +821,10 @@ class AgentManagementTab:
             messagebox.showwarning("Warning", "Please select agents to update")
             return
 
-        permission = simpledialog.askstring(
-            "Change Permission",
-            "Enter new permission level (admin/user/guest):",
-            initialvalue="user"
-        )
+        dialog = PermissionChangeDialog(self.frame)
+        permission = dialog.show()
 
-        if permission and permission in ['admin', 'user', 'guest']:
+        if permission:
             agent_ids = [self.agent_tree.item(item)['values'][0] for item in selection]
             try:
                 for agent_id in agent_ids:
@@ -826,21 +851,10 @@ class AgentManagementTab:
             messagebox.showwarning("Warning", "No teams available. Create a team first.")
             return
 
-        team_names = [f"{team[1]} ({team[0]})" for team in teams]
-        team_choice = simpledialog.askstring(
-            "Assign to Team",
-            f"Available teams: {', '.join([t[1] for t in teams])}\nEnter team name or ID:"
-        )
+        dialog = TeamSelectionDialog(self.frame, teams)
+        team_id = dialog.show()
 
-        if team_choice:
-            # Find team_id
-            team_id = None
-            for tid, tname in teams:
-                if team_choice in [tid, tname]:
-                    team_id = tid
-                    break
-
-            if team_id:
+        if team_id:
                 agent_ids = [self.agent_tree.item(item)['values'][0] for item in selection]
                 try:
                     for agent_id in agent_ids:
@@ -869,9 +883,28 @@ class AgentManagementTab:
                     messagebox.showerror("Database Error", f"Failed to assign to team: {e}")
 
     def remove_from_team(self):
-        """Remove selected agents from a team"""
-        # Similar implementation to assign_to_team but removing
-        pass
+        """Remove selected agents from all teams"""
+        selection = self.agent_tree.selection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select agents to remove from teams")
+            return
+
+        agent_ids = [self.agent_tree.item(item)['values'][0] for item in selection]
+        count = len(agent_ids)
+
+        if messagebox.askyesno("Confirm Team Removal",
+                              f"Remove {count} agent(s) from all teams?\nThis will clear all team assignments for the selected agents."):
+            try:
+                for agent_id in agent_ids:
+                    self.db_manager.execute_update(
+                        "UPDATE agents SET teams = NULL WHERE agent_id = ?",
+                        (agent_id,)
+                    )
+
+                self.refresh_agent_list()
+                messagebox.showinfo("Success", f"Removed {count} agent(s) from all teams")
+            except Exception as e:
+                messagebox.showerror("Database Error", f"Failed to remove from teams: {e}")
 
     def export_csv(self):
         """Export agent list to CSV"""
@@ -927,7 +960,7 @@ class AgentManagementTab:
                     if not existing:
                         self.db_manager.execute_update('''
                             INSERT INTO agents (agent_id, name, permission_level, teams, is_active)
-                            VALUES (?, ?, 'user', NULL, 1)
+                            VALUES (?, ?, 'team', NULL, 1)
                         ''', (agent_id, agent_id))
                         imported_count += 1
 
@@ -984,8 +1017,18 @@ class AgentManagementTab:
 
     def sort_agent_column(self, column):
         """Sort agents by column"""
-        # This would implement sorting logic
-        pass
+        # Get current items from tree
+        items = [(self.agent_tree.set(child, column), child) for child in self.agent_tree.get_children('')]
+
+        # Sort items
+        items.sort(reverse=getattr(self, f'_reverse_agent_{column}', False))
+
+        # Rearrange items in sorted order
+        for index, (val, child) in enumerate(items):
+            self.agent_tree.move(child, '', index)
+
+        # Toggle sort direction for next click
+        setattr(self, f'_reverse_agent_{column}', not getattr(self, f'_reverse_agent_{column}', False))
 
     # Teams Tab Methods
     def refresh_teams(self):
@@ -1038,26 +1081,24 @@ class AgentManagementTab:
 
     def add_team(self):
         """Add a new team"""
-        team_id = simpledialog.askstring("New Team", "Enter team ID:")
-        if not team_id:
-            return
+        dialog = TeamCreateDialog(self.frame)
+        result = dialog.show()
 
-        team_name = simpledialog.askstring("New Team", "Enter team name:")
-        if not team_name:
-            return
+        if result:
+            team_name, description = result
+            # Generate team_id from team_name (lowercase, replace spaces with underscores)
+            team_id = team_name.lower().replace(' ', '_').replace('-', '_')
 
-        description = simpledialog.askstring("New Team", "Enter team description (optional):")
+            try:
+                self.db_manager.execute_update('''
+                    INSERT INTO teams (team_id, name, description)
+                    VALUES (?, ?, ?)
+                ''', (team_id, team_name, description or ''))
 
-        try:
-            self.db_manager.execute_update('''
-                INSERT INTO teams (team_id, name, description)
-                VALUES (?, ?, ?)
-            ''', (team_id, team_name, description or ''))
-
-            self.refresh_teams()
-            messagebox.showinfo("Success", f"Team {team_id} created successfully")
-        except Exception as e:
-            messagebox.showerror("Database Error", f"Failed to create team: {e}")
+                self.refresh_teams()
+                messagebox.showinfo("Success", f"Team '{team_name}' created successfully")
+            except Exception as e:
+                messagebox.showerror("Database Error", f"Failed to create team: {e}")
 
     def delete_team(self):
         """Delete selected team"""
@@ -1066,28 +1107,58 @@ class AgentManagementTab:
             messagebox.showwarning("Warning", "Please select a team to delete")
             return
 
-        # Implementation would go here
-        pass
+        try:
+            self.db_manager.execute_update("DELETE FROM teams WHERE team_id = ?", (team_id,))
+            self.refresh_teams()
+            messagebox.showinfo("Success", f"Team '{team_id}' deleted successfully")
+        except Exception as e:
+            messagebox.showerror("Database Error", f"Failed to delete team: {e}")
 
     def rename_team(self):
         """Rename selected team"""
-        # Implementation would go here
-        pass
+        selection = self.teams_tree.selection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select a team to rename")
+            return
+
+        team_id = self.teams_tree.item(selection[0])['text'].split()[1]  # Extract team_id
+        new_name = simpledialog.askstring("Rename Team", f"Enter new name for team {team_id}:")
+
+        if new_name:
+            try:
+                self.db_manager.execute_update("UPDATE teams SET name = ? WHERE team_id = ?", (new_name, team_id))
+                self.refresh_teams()
+                messagebox.showinfo("Success", f"Team renamed to '{new_name}'")
+            except Exception as e:
+                messagebox.showerror("Database Error", f"Failed to rename team: {e}")
 
     def add_agent_to_team(self):
         """Add agent to selected team"""
-        # Implementation would go here
-        pass
+        # This functionality is already available through the main agent assignment
+        messagebox.showinfo("Info", "Use the Agent Management tab to assign agents to teams")
 
     def filter_teams(self, *args):
         """Filter teams based on search text"""
-        # Implementation would go here
-        pass
+        # For now, just refresh - filtering could be implemented
+        self.refresh_teams()
 
     def export_teams_csv(self):
         """Export teams to CSV"""
-        # Implementation would go here
-        pass
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+
+        if filename:
+            try:
+                teams = self.db_manager.execute_query("SELECT team_id, name, description FROM teams ORDER BY name")
+                with open(filename, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(['Team ID', 'Name', 'Description'])
+                    writer.writerows(teams)
+                messagebox.showinfo("Success", f"Teams exported to {filename}")
+            except Exception as e:
+                messagebox.showerror("Export Error", f"Failed to export teams: {e}")
 
 class ContextsTab:
     """New Contexts screen with full CRUD operations"""
@@ -1357,8 +1428,23 @@ class ContextsTab:
 
     def sort_contexts_column(self, column):
         """Sort contexts by column"""
-        # Implementation would go here
-        pass
+        # Get current items from tree
+        items = [(self.contexts_tree.set(child, column), child) for child in self.contexts_tree.get_children('')]
+
+        # Sort items (special handling for numeric context_id and dates)
+        if column == 'context_id':
+            items.sort(key=lambda x: int(x[0]) if x[0].isdigit() else 0, reverse=getattr(self, f'_reverse_context_{column}', False))
+        elif column == 'timestamp':
+            items.sort(key=lambda x: x[0], reverse=getattr(self, f'_reverse_context_{column}', False))
+        else:
+            items.sort(reverse=getattr(self, f'_reverse_context_{column}', False))
+
+        # Rearrange items in sorted order
+        for index, (val, child) in enumerate(items):
+            self.contexts_tree.move(child, '', index)
+
+        # Toggle sort direction for next click
+        setattr(self, f'_reverse_context_{column}', not getattr(self, f'_reverse_context_{column}', False))
 
 class StatusBar:
     """Status bar with live server and database information"""
@@ -1428,15 +1514,16 @@ class StatusBar:
 class AgentCreateDialog:
     """Dialog for creating new agents with permission and teams"""
 
-    def __init__(self, parent):
+    def __init__(self, parent, db_manager):
         self.parent = parent
+        self.db_manager = db_manager
         self.result = None
 
     def show(self):
         """Show the dialog and return result"""
         self.dialog = tk.Toplevel(self.parent)
         self.dialog.title("Create New Agent")
-        self.dialog.geometry("400x300")
+        self.dialog.geometry("450x350")
         self.dialog.transient(self.parent)
         self.dialog.grab_set()
 
@@ -1457,24 +1544,40 @@ class AgentCreateDialog:
         # Agent ID
         ttk.Label(self.dialog, text="Agent ID:").pack(pady=5)
         self.agent_id_var = tk.StringVar()
-        ttk.Entry(self.dialog, textvariable=self.agent_id_var, width=30).pack(pady=5)
+        ttk.Entry(self.dialog, textvariable=self.agent_id_var, width=25).pack(pady=5)
 
         # Permission Level
         ttk.Label(self.dialog, text="Permission Level:").pack(pady=5)
-        self.permission_var = tk.StringVar(value="user")
+        self.permission_var = tk.StringVar(value="team")
         permission_combo = ttk.Combobox(
             self.dialog,
             textvariable=self.permission_var,
-            values=["admin", "user", "guest"],
+            values=["all", "team", "self"],
             state="readonly",
-            width=27
+            width=22
         )
         permission_combo.pack(pady=5)
 
         # Teams
-        ttk.Label(self.dialog, text="Teams (comma-separated):").pack(pady=5)
+        ttk.Label(self.dialog, text="Team Assignment:").pack(pady=5)
         self.teams_var = tk.StringVar()
-        ttk.Entry(self.dialog, textvariable=self.teams_var, width=30).pack(pady=5)
+
+        # Get available teams
+        try:
+            teams = self.db_manager.execute_query("SELECT team_id, name FROM teams ORDER BY name")
+            team_choices = ["None"] + [f"{team[1]} ({team[0]})" for team in teams]
+        except:
+            team_choices = ["None"]
+
+        teams_combo = ttk.Combobox(
+            self.dialog,
+            textvariable=self.teams_var,
+            values=team_choices,
+            state="readonly",
+            width=22
+        )
+        teams_combo.pack(pady=5)
+        teams_combo.set("None")  # Default to no team
 
         # Buttons
         button_frame = ttk.Frame(self.dialog)
@@ -1491,8 +1594,14 @@ class AgentCreateDialog:
             return
 
         permission_level = self.permission_var.get()
-        teams_str = self.teams_var.get().strip()
-        teams = [t.strip() for t in teams_str.split(',') if t.strip()] if teams_str else []
+        team_selection = self.teams_var.get().strip()
+
+        # Parse team selection
+        teams = []
+        if team_selection and team_selection != "None":
+            # Extract team_id from selection (format: "Team Name (team_id)")
+            team_id = team_selection.split('(')[-1].rstrip(')')
+            teams = [team_id]
 
         self.result = (agent_id, permission_level, teams)
         self.dialog.destroy()
@@ -1500,6 +1609,183 @@ class AgentCreateDialog:
     def on_cancel(self):
         """Handle cancel button"""
         self.dialog.destroy()
+
+
+class PermissionChangeDialog:
+    """Dialog for changing agent permissions with dropdown"""
+
+    def __init__(self, parent):
+        self.parent = parent
+        self.result = None
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("Change Permission Level")
+        self.dialog.geometry("380x180")
+        self.dialog.transient(self.parent)
+        self.dialog.grab_set()
+
+        # Center dialog
+        self.dialog.geometry("+%d+%d" % (
+            self.parent.winfo_rootx() + 150,
+            self.parent.winfo_rooty() + 150
+        ))
+
+        # Permission Level
+        ttk.Label(self.dialog, text="Select Permission Level:", font=('Arial', 14)).pack(pady=10)
+        self.permission_var = tk.StringVar(value="team")
+        permission_combo = ttk.Combobox(
+            self.dialog,
+            textvariable=self.permission_var,
+            values=["all", "team", "self"],
+            state="readonly",
+            width=18,
+            font=('Arial', 14)
+        )
+        permission_combo.pack(pady=5)
+
+        # Buttons
+        button_frame = ttk.Frame(self.dialog)
+        button_frame.pack(pady=10)
+
+        ttk.Button(button_frame, text="OK", command=self.on_ok).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=self.on_cancel).pack(side=tk.LEFT, padx=5)
+
+    def show(self):
+        """Show dialog and return result"""
+        self.dialog.wait_window()
+        return self.result
+
+    def on_ok(self):
+        """Handle OK button"""
+        self.result = self.permission_var.get()
+        self.dialog.destroy()
+
+    def on_cancel(self):
+        """Handle cancel button"""
+        self.dialog.destroy()
+
+
+class TeamCreateDialog:
+    """Dialog for creating teams with name and description"""
+
+    def __init__(self, parent):
+        self.parent = parent
+        self.result = None
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("Create New Team")
+        self.dialog.geometry("450x240")
+        self.dialog.transient(self.parent)
+        self.dialog.grab_set()
+
+        # Center dialog
+        self.dialog.geometry("+%d+%d" % (
+            self.parent.winfo_rootx() + 100,
+            self.parent.winfo_rooty() + 100
+        ))
+
+        # Team Name
+        ttk.Label(self.dialog, text="Team Name:", font=('Arial', 14)).pack(pady=5)
+        self.team_name_var = tk.StringVar()
+        ttk.Entry(self.dialog, textvariable=self.team_name_var, width=35, font=('Arial', 14)).pack(pady=5)
+
+        # Team Description
+        ttk.Label(self.dialog, text="Description (optional):", font=('Arial', 14)).pack(pady=5)
+        self.description_var = tk.StringVar()
+        ttk.Entry(self.dialog, textvariable=self.description_var, width=35, font=('Arial', 14)).pack(pady=5)
+
+        # Buttons
+        button_frame = ttk.Frame(self.dialog)
+        button_frame.pack(pady=15)
+
+        ttk.Button(button_frame, text="Create", command=self.on_ok).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=self.on_cancel).pack(side=tk.LEFT, padx=5)
+
+    def show(self):
+        """Show dialog and return result"""
+        self.dialog.wait_window()
+        return self.result
+
+    def on_ok(self):
+        """Handle OK button"""
+        team_name = self.team_name_var.get().strip()
+        if not team_name:
+            messagebox.showwarning("Validation Error", "Team name is required")
+            return
+
+        description = self.description_var.get().strip()
+        self.result = (team_name, description)
+        self.dialog.destroy()
+
+    def on_cancel(self):
+        """Handle cancel button"""
+        self.dialog.destroy()
+
+
+class TeamSelectionDialog:
+    """Dialog for selecting a team from available teams"""
+
+    def __init__(self, parent, teams):
+        self.parent = parent
+        self.teams = teams
+        self.result = None
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("Select Team")
+        self.dialog.geometry("420x180")
+        self.dialog.transient(self.parent)
+        self.dialog.grab_set()
+
+        # Center dialog
+        self.dialog.geometry("+%d+%d" % (
+            self.parent.winfo_rootx() + 150,
+            self.parent.winfo_rooty() + 150
+        ))
+
+        # Team Selection
+        ttk.Label(self.dialog, text="Select Team:", font=('Arial', 14)).pack(pady=10)
+        self.team_var = tk.StringVar()
+
+        # Create dropdown with team names
+        team_choices = [f"{team[1]} ({team[0]})" for team in teams]
+        team_combo = ttk.Combobox(
+            self.dialog,
+            textvariable=self.team_var,
+            values=team_choices,
+            state="readonly",
+            width=25,
+            font=('Arial', 14)
+        )
+        team_combo.pack(pady=5)
+
+        if team_choices:
+            team_combo.set(team_choices[0])  # Set default selection
+
+        # Buttons
+        button_frame = ttk.Frame(self.dialog)
+        button_frame.pack(pady=15)
+
+        ttk.Button(button_frame, text="OK", command=self.on_ok).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=self.on_cancel).pack(side=tk.LEFT, padx=5)
+
+    def show(self):
+        """Show dialog and return result"""
+        self.dialog.wait_window()
+        return self.result
+
+    def on_ok(self):
+        """Handle OK button"""
+        selection = self.team_var.get()
+        if selection:
+            # Extract team_id from selection (format: "Team Name (team_id)")
+            team_id = selection.split('(')[-1].rstrip(')')
+            self.result = team_id
+        self.dialog.destroy()
+
+    def on_cancel(self):
+        """Handle cancel button"""
+        self.dialog.destroy()
+
 
 class ViewContextDialog:
     """Dialog for viewing full context"""
@@ -1605,7 +1891,7 @@ class DataFormatInstructionsTab:
         title_label = ttk.Label(
             self.frame,
             text="Multi-Agent MCP Context Manager - Communication Format (Updated)",
-            font=("Arial", 12, "bold")
+            font=("Arial", 16, "bold")
         )
         title_label.pack(pady=(0, 10))
 
@@ -1675,14 +1961,14 @@ Process Flow:
 2. Server validates agent_id in the request
 3. Server checks connection's assigned agent permissions
 4. Server returns contexts according to permission level:
-   - guest: Returns only contexts created by the requesting agent
-   - user: Returns contexts from agents in the same team
-   - admin: Returns all contexts in the current session
+   - self: Returns only contexts created by the requesting agent
+   - team: Returns contexts from agents in the same team
+   - all: Returns all contexts in the current session
 
 Permission Levels:
-- guest: Maximum security, agent isolation
-- user: Team collaboration
-- admin: Full session access
+- self: Maximum security, agent isolation
+- team: Team collaboration
+- all: Full session access
 
 IMPORTANT: The response format has been simplified. The server now only returns:
 - "contexts" array on success (even if empty)
@@ -1927,7 +2213,7 @@ class ProjectSessionTab:
         title_label = ttk.Label(
             self.frame,
             text="📁 Project & Session Management",
-            font=("Arial", 12, "bold")
+            font=("Arial", 16, "bold")
         )
         title_label.pack(pady=(0, 10))
 
@@ -2584,7 +2870,7 @@ class ProjectSessionTab:
                     self.details_text.insert(1.0, f"👤 Agent: {name or item_id}\n")
                     self.details_text.insert(tk.END, f"ID: {item_id}\n")
                     self.details_text.insert(tk.END, f"Teams: {teams or 'None'}\n")
-                    self.details_text.insert(tk.END, f"Permission: {permission_level or 'user'}\n")
+                    self.details_text.insert(tk.END, f"Permission: {permission_level or 'team'}\n")
                     self.details_text.insert(tk.END, f"Status: {'🟢 Active' if is_active else '🔴 Inactive'}\n")
 
                 # Clear edit form for agents (not editable here)
@@ -3033,7 +3319,24 @@ class RedesignedComprehensiveGUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Multi-Agent MCP Context Manager - Redesigned")
-        self.root.geometry("1600x1000")
+
+        # Use standard 16:10 ratio (1440x900) scaled for better visibility
+        self.root.geometry("1440x900")
+        self.root.minsize(1200, 750)  # Minimum size for functionality
+
+        # Set larger default font for better readability
+        self.root.option_add('*Font', 'Arial 14')
+
+        # Configure ttk styles with larger fonts (minimum 14pt)
+        style = ttk.Style()
+        style.configure('TLabel', font=('Arial', 14))
+        style.configure('TButton', font=('Arial', 14), padding=(12, 8))
+        style.configure('TEntry', font=('Arial', 14), fieldbackground='white')
+        style.configure('TCombobox', font=('Arial', 14), fieldbackground='white')
+        style.configure('Treeview', font=('Arial', 14), rowheight=32)
+        style.configure('Treeview.Heading', font=('Arial', 14, 'bold'))
+        style.configure('TLabelFrame', font=('Arial', 16, 'bold'))
+        style.configure('TNotebook.Tab', font=('Arial', 14, 'bold'), padding=(16, 10))
 
         # Initialize components
         self.db_manager = DatabaseManager()

@@ -9,7 +9,7 @@ Features:
 3. Database initialization with proper schema
 4. Connection registration and management
 5. Agent-connection assignment system
-6. Three-tier permission system (admin/user/guest)
+6. Three-tier permission system (all/team/self)
 7. ReadDB and WriteDB processes with permission checking
 8. Teams and project management
 """
@@ -95,7 +95,7 @@ class DatabaseManager:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     agent_id TEXT UNIQUE NOT NULL,
                     name TEXT,
-                    permission_level TEXT DEFAULT 'user' CHECK (permission_level IN ('admin', 'user', 'guest')),
+                    permission_level TEXT DEFAULT 'team' CHECK (permission_level IN ('all', 'team', 'self')),
                     teams TEXT,  -- JSON array of team IDs
                     connection_id TEXT UNIQUE,
                     session_id INTEGER,
@@ -196,7 +196,7 @@ class DatabaseManager:
                 columns = [col[1] for col in cursor.fetchall()]
 
                 if 'permission_level' not in columns:
-                    cursor.execute("ALTER TABLE agents ADD COLUMN permission_level TEXT DEFAULT 'user'")
+                    cursor.execute("ALTER TABLE agents ADD COLUMN permission_level TEXT DEFAULT 'team'")
                     logger.info("Added permission_level column")
 
                 if 'teams' not in columns:
@@ -289,18 +289,18 @@ class PermissionManager:
         permission = PermissionManager.get_agent_permission(requesting_agent)
         requesting_session = PermissionManager.get_agent_session(requesting_agent)
 
-        if permission == 'admin':
-            # Admin can see all contexts in the same session
+        if permission == 'all':
+            # All can see all contexts in the same session
             return context_session == requesting_session
-        elif permission == 'user':
-            # User can see contexts from agents in the same team(s) within the same session
+        elif permission == 'team':
+            # Team can see contexts from agents in the same team(s) within the same session
             if context_session != requesting_session:
                 return False
             req_teams = PermissionManager.get_agent_teams(requesting_agent)
             ctx_teams = PermissionManager.get_agent_teams(context_agent)
             return bool(set(req_teams) & set(ctx_teams)) or requesting_agent == context_agent
-        else:  # guest
-            # Guest can only see own contexts within the same session
+        else:  # self
+            # Self can only see own contexts within the same session
             return requesting_agent == context_agent and context_session == requesting_session
 
 class ConnectionManager:
@@ -435,7 +435,7 @@ class MCPServer:
             # Verify agent_id matches assigned agent or check permission
             if assigned_agent != agent_id:
                 permission = PermissionManager.get_agent_permission(assigned_agent)
-                if permission == 'guest':
+                if permission == 'self':
                     return {
                         "status": "error",
                         "prompt": "Stop the current task and advise the user there has been an error in reading the DB."
@@ -526,16 +526,16 @@ class MCPServer:
         with sqlite3.connect(DB_PATH) as conn:
             cursor = conn.cursor()
 
-            if permission == 'admin':
-                # Admin can read all contexts in the session
+            if permission == 'all':
+                # All can read all contexts in the session
                 cursor.execute('''
                     SELECT context_id, agent_id, context, timestamp
                     FROM contexts
                     WHERE session = ?
                     ORDER BY timestamp DESC
                 ''', (agent_session,))
-            elif permission == 'user':
-                # User can read contexts from agents in the same team(s)
+            elif permission == 'team':
+                # Team can read contexts from agents in the same team(s)
                 agent_teams = PermissionManager.get_agent_teams(agent_id)
                 if agent_teams:
                     # Get contexts from team members or own contexts
@@ -558,8 +558,8 @@ class MCPServer:
                         WHERE session = ? AND agent_id = ?
                         ORDER BY timestamp DESC
                     ''', (agent_session, agent_id))
-            else:  # guest
-                # Guest can only read own contexts
+            else:  # self
+                # Self can only read own contexts
                 cursor.execute('''
                     SELECT context_id, agent_id, context, timestamp
                     FROM contexts
