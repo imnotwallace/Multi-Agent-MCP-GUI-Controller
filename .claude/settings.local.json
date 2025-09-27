@@ -14,7 +14,11 @@
       "Bash(grep:*)",
       "Bash(del test_admin_bulk_remove.py test_admin_simple.py)",
       "Bash(claude mcp:*)",
-      "Bash(F:/Python/Multi-Agent_MCP_GUI_Controller/.venv/Scripts/activate)"
+      "Bash(F:/Python/Multi-Agent_MCP_GUI_Controller/.venv/Scripts/activate)",
+      "Bash(dir:*)",
+      "Bash(mkdir:*)",
+      "Bash(mv:*)",
+      "Bash(set LAUNCH_GUI=true)"
     ],
     "deny": [],
     "ask": []

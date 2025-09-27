@@ -1,0 +1,35 @@
+{
+  "mcpServers": {
+    "multi-agent-context-manager": {
+      "command": "python",
+      "args": [
+        "run_redesigned_mcp_server.py"
+      ],
+      "env": {
+        "MCP_SERVER_PORT": "8765",
+        "MCP_SERVER_HOST": "127.0.0.1",
+        "LAUNCH_GUI": "false"
+      }
+    },
+    "multi-agent-context-manager-with-gui": {
+      "command": "python",
+      "args": [
+        "run_redesigned_mcp_server.py"
+      ],
+      "env": {
+        "MCP_SERVER_PORT": "8765",
+        "MCP_SERVER_HOST": "127.0.0.1",
+        "LAUNCH_GUI": "true"
+      }
+    }
+  },
+  "server_config": {
+    "name": "Multi-Agent Context Manager",
+    "version": "1.0.0",
+    "description": "MCP server for multi-agent context management with permission system",
+    "host": "127.0.0.1",
+    "port": 8765,
+    "database_path": "multi-agent_mcp_context_manager.db",
+    "allowlist_path": "mcp_allowlist.json"
+  }
+}

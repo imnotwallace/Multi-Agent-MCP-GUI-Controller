@@ -34,7 +34,11 @@ import os
 import urllib.request
 import urllib.error
 import uvicorn
-from multi_agent_mcp_server import app as mcp_app
+try:
+    from archive.multi_agent_mcp_server import app as mcp_app
+except ImportError:
+    # Fallback to redesigned server if old one not available
+    from redesigned_mcp_server import app as mcp_app
 
 
 class ServerSubscriber:
@@ -1031,13 +1035,16 @@ class PerformantMCPView:
 
             # Try to update running server module's AGENT_ALLOWLIST if present
             try:
-                import multi_agent_mcp_server
+                import archive.multi_agent_mcp_server as multi_agent_mcp_server
                 if hasattr(multi_agent_mcp_server, 'AGENT_ALLOWLIST'):
                     try:
                         multi_agent_mcp_server.AGENT_ALLOWLIST.add(agent_id)
                         logger.info("Added agent to running server allowlist: %s", agent_id)
                     except Exception:
                         logger.exception("Failed updating multi_agent_mcp_server.AGENT_ALLOWLIST at runtime")
+            except ImportError:
+                # Using redesigned server - allowlist is file-based now
+                logger.info("Agent %s added (file-based allowlist in redesigned server)", agent_id)
             except Exception:
                 # Not fatal; server may not be running in same process
                 pass
@@ -1403,7 +1410,7 @@ class PerformantMCPView:
 
         # Try to push to running server module
         try:
-            import multi_agent_mcp_server
+            import archive.multi_agent_mcp_server as multi_agent_mcp_server
             if hasattr(multi_agent_mcp_server, 'AGENT_ALLOWLIST'):
                 try:
                     multi_agent_mcp_server.AGENT_ALLOWLIST.clear()
@@ -1416,6 +1423,10 @@ class PerformantMCPView:
                     messagebox.showerror("Error", "Failed to push allowlist to server (see logs)", parent=self.root)
             else:
                 messagebox.showwarning("Warning", "Running server not detected in-process; changes persisted to file only", parent=self.root)
+        except ImportError:
+            # Using redesigned server - allowlist is file-based now
+            messagebox.showinfo("Updated", "Allowlist updated in file (redesigned server uses file-based allowlist)", parent=self.root)
+            logger.info("Allowlist updated in file for redesigned server: %s", items)
         except Exception:
             logger.exception("Failed to push allowlist to running server")
             messagebox.showwarning("Warning", "Could not contact running server in-process; allowlist persisted to file", parent=self.root)
