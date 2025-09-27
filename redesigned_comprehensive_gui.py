@@ -23,29 +23,159 @@ from datetime import datetime
 from typing import Dict, List, Optional, Set
 import threading
 import time
+import queue
+
+class ValidationManager:
+    """Centralized validation for database operations"""
+
+    def __init__(self, db_manager):
+        self.db_manager = db_manager
+
+    def validate_project_name(self, name, exclude_id=None):
+        """Validate project name for duplicates and constraints"""
+        if not name or not name.strip():
+            return False, "Project name cannot be empty"
+
+        name = name.strip()
+        if len(name) > 100:
+            return False, "Project name cannot exceed 100 characters"
+
+        # Check for duplicates across entire database
+        query = "SELECT id, name FROM projects WHERE LOWER(name) = LOWER(?)"
+        params = [name]
+
+        if exclude_id:
+            query += " AND id != ?"
+            params.append(exclude_id)
+
+        existing = self.db_manager.execute_query(query, params)
+        if existing:
+            return False, f"Project '{name}' already exists (ID: {existing[0][0]})"
+
+        return True, ""
+
+    def validate_session_name(self, name, project_id=None, exclude_id=None):
+        """Validate session name for duplicates and constraints"""
+        if not name or not name.strip():
+            return False, "Session name cannot be empty"
+
+        name = name.strip()
+        if len(name) > 100:
+            return False, "Session name cannot exceed 100 characters"
+
+        # Check for duplicates across entire database, not just within project
+        query = "SELECT s.id, s.name, p.name FROM sessions s JOIN projects p ON s.project_id = p.id WHERE LOWER(s.name) = LOWER(?)"
+        params = [name]
+
+        if exclude_id:
+            query += " AND s.id != ?"
+            params.append(exclude_id)
+
+        existing = self.db_manager.execute_query(query, params)
+        if existing:
+            return False, f"Session '{name}' already exists in project '{existing[0][2]}' (ID: {existing[0][0]})"
+
+        return True, ""
+
+    def validate_agent_name(self, name, exclude_id=None):
+        """Validate agent name for duplicates and constraints"""
+        if not name or not name.strip():
+            return False, "Agent name cannot be empty"
+
+        name = name.strip()
+        if len(name) > 50:
+            return False, "Agent name cannot exceed 50 characters"
+
+        # Check for duplicates
+        query = "SELECT agent_id, name FROM agents WHERE LOWER(name) = LOWER(?)"
+        params = [name]
+
+        if exclude_id:
+            query += " AND agent_id != ?"
+            params.append(exclude_id)
+
+        existing = self.db_manager.execute_query(query, params)
+        if existing:
+            return False, f"Agent name '{name}' already exists (ID: {existing[0][0]})"
+
+        return True, ""
 
 class DatabaseManager:
-    """Handles all database operations for the redesigned system"""
+    """Handles all database operations for the redesigned system with connection pooling"""
 
-    def __init__(self, db_path="multi-agent_mcp_context_manager.db"):
+    def __init__(self, db_path="multi-agent_mcp_context_manager.db", pool_size=5):
         self.db_path = db_path
+        self.pool_size = pool_size
+        self.connection_pool = queue.Queue(maxsize=pool_size)
+        self.pool_lock = threading.Lock()
+
+        # Initialize connection pool
+        self._initialize_pool()
+
+    def _initialize_pool(self):
+        """Initialize the connection pool"""
+        for _ in range(self.pool_size):
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")  # Enable WAL mode for better concurrency
+            conn.execute("PRAGMA synchronous=NORMAL")  # Better performance
+            conn.execute("PRAGMA cache_size=1000")  # Increase cache size
+            conn.execute("PRAGMA temp_store=memory")  # Store temp tables in memory
+            self.connection_pool.put(conn)
 
     def get_connection(self):
-        return sqlite3.connect(self.db_path)
+        """Get a connection from the pool"""
+        try:
+            conn = self.connection_pool.get(timeout=5)
+            return conn
+        except queue.Empty:
+            # If pool is empty, create a new connection
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA cache_size=1000")
+            conn.execute("PRAGMA temp_store=memory")
+            return conn
+
+    def return_connection(self, conn):
+        """Return a connection to the pool"""
+        try:
+            self.connection_pool.put_nowait(conn)
+        except queue.Full:
+            # Pool is full, close the connection
+            conn.close()
+
+    def close_pool(self):
+        """Close all connections in the pool"""
+        with self.pool_lock:
+            while not self.connection_pool.empty():
+                try:
+                    conn = self.connection_pool.get_nowait()
+                    conn.close()
+                except queue.Empty:
+                    break
 
     def execute_query(self, query, params=None):
-        """Execute a query and return results"""
-        with self.get_connection() as conn:
+        """Execute a query and return results using connection pool"""
+        conn = self.get_connection()
+        try:
             cursor = conn.cursor()
             if params:
                 cursor.execute(query, params)
             else:
                 cursor.execute(query)
-            return cursor.fetchall()
+            result = cursor.fetchall()
+            return result
+        except Exception as e:
+            # Log error but don't crash the application
+            print(f"Database query error: {e}")
+            raise
+        finally:
+            self.return_connection(conn)
 
     def execute_update(self, query, params=None):
-        """Execute an update/insert/delete query"""
-        with self.get_connection() as conn:
+        """Execute an update/insert/delete query using connection pool"""
+        conn = self.get_connection()
+        try:
             cursor = conn.cursor()
             if params:
                 cursor.execute(query, params)
@@ -53,6 +183,12 @@ class DatabaseManager:
                 cursor.execute(query)
             conn.commit()
             return cursor.rowcount
+        except Exception as e:
+            conn.rollback()
+            print(f"Database update error: {e}")
+            raise
+        finally:
+            self.return_connection(conn)
 
 class ServerStatusMonitor:
     """Monitors server status and connection counts"""
@@ -1539,14 +1675,14 @@ Process Flow:
 2. Server validates agent_id in the request
 3. Server checks connection's assigned agent permissions
 4. Server returns contexts according to permission level:
-   - self_only: Returns only contexts created by the requesting agent
-   - team_level: Returns contexts from agents in the same team
-   - session_level: Returns all contexts in the current session
+   - guest: Returns only contexts created by the requesting agent
+   - user: Returns contexts from agents in the same team
+   - admin: Returns all contexts in the current session
 
 Permission Levels:
-- self_only: Maximum security, agent isolation
-- team_level: Team collaboration
-- session_level: Full session access
+- guest: Maximum security, agent isolation
+- user: Team collaboration
+- admin: Full session access
 
 IMPORTANT: The response format has been simplified. The server now only returns:
 - "contexts" array on success (even if empty)
@@ -1782,6 +1918,7 @@ class ProjectSessionTab:
     def __init__(self, parent, db_manager):
         self.parent = parent
         self.db_manager = db_manager
+        self.validator = ValidationManager(db_manager)
         self.frame = ttk.Frame(parent)
 
     def create_widgets(self):
@@ -1808,6 +1945,14 @@ class ProjectSessionTab:
         self.project_tree.column('#0', width=350)
         self.project_tree.pack(fill=tk.BOTH, expand=True)
         self.project_tree.bind('<<TreeviewSelect>>', self.on_tree_select)
+
+        # Drag and drop bindings
+        self.project_tree.bind('<Button-1>', self.on_drag_start)
+        self.project_tree.bind('<B1-Motion>', self.on_drag_motion)
+        self.project_tree.bind('<ButtonRelease-1>', self.on_drag_release)
+
+        # Drag state variables
+        self.drag_data = {"item": None, "x": 0, "y": 0}
 
         # Search/Filter box for projects
         search_frame = ttk.Frame(left_frame)
@@ -2091,7 +2236,7 @@ class ProjectSessionTab:
             self.project_tree.item(item, open=True)
 
     def rename_selected(self):
-        """Rename selected project or session"""
+        """Rename selected project or session with enhanced validation"""
         selection = self.project_tree.selection()
         if not selection:
             messagebox.showwarning("Warning", "Please select a project or session to rename")
@@ -2116,12 +2261,10 @@ class ProjectSessionTab:
             )
             if new_name and new_name != item_text:
                 try:
-                    # Check for duplicates
-                    existing = self.db_manager.execute_query(
-                        "SELECT id FROM projects WHERE name = ? AND id != ?", (new_name.strip(), item_id)
-                    )
-                    if existing:
-                        messagebox.showerror("Error", f"Project '{new_name}' already exists")
+                    # Enhanced validation
+                    is_valid, error_msg = self.validator.validate_project_name(new_name, exclude_id=item_id)
+                    if not is_valid:
+                        messagebox.showerror("Validation Error", error_msg)
                         return
 
                     self.db_manager.execute_update(
@@ -2129,7 +2272,7 @@ class ProjectSessionTab:
                         (new_name.strip(), item_id)
                     )
                     self.refresh_tree()
-                    messagebox.showinfo("Success", f"Project renamed to '{new_name}'")
+                    messagebox.showinfo("Success", f"Project renamed to '{new_name.strip()}'")
                 except Exception as e:
                     messagebox.showerror("Database Error", f"Failed to rename project: {e}")
 
@@ -2141,12 +2284,10 @@ class ProjectSessionTab:
             )
             if new_name and new_name != item_text:
                 try:
-                    # Check for duplicates
-                    existing = self.db_manager.execute_query(
-                        "SELECT id FROM sessions WHERE name = ? AND id != ?", (new_name.strip(), item_id)
-                    )
-                    if existing:
-                        messagebox.showerror("Error", f"Session '{new_name}' already exists")
+                    # Enhanced validation
+                    is_valid, error_msg = self.validator.validate_session_name(new_name, exclude_id=item_id)
+                    if not is_valid:
+                        messagebox.showerror("Validation Error", error_msg)
                         return
 
                     self.db_manager.execute_update(
@@ -2154,7 +2295,7 @@ class ProjectSessionTab:
                         (new_name.strip(), item_id)
                     )
                     self.refresh_tree()
-                    messagebox.showinfo("Success", f"Session renamed to '{new_name}'")
+                    messagebox.showinfo("Success", f"Session renamed to '{new_name.strip()}'")
                 except Exception as e:
                     messagebox.showerror("Database Error", f"Failed to rename session: {e}")
 
@@ -2162,7 +2303,7 @@ class ProjectSessionTab:
             messagebox.showinfo("Info", "Only projects and sessions can be renamed")
 
     def save_details(self):
-        """Save changes to project/session details"""
+        """Save changes to project/session details with enhanced validation"""
         if not self.current_selection:
             messagebox.showwarning("Warning", "No item selected for editing")
             return
@@ -2171,18 +2312,12 @@ class ProjectSessionTab:
         new_name = self.edit_name_var.get().strip()
         new_description = self.edit_desc_text.get('1.0', tk.END).strip()
 
-        if not new_name:
-            messagebox.showerror("Error", "Name cannot be empty")
-            return
-
         try:
             if item_type == 'project':
-                # Check for duplicate names
-                existing = self.db_manager.execute_query(
-                    "SELECT id FROM projects WHERE name = ? AND id != ?", (new_name, item_id)
-                )
-                if existing:
-                    messagebox.showerror("Error", f"Project '{new_name}' already exists")
+                # Enhanced validation
+                is_valid, error_msg = self.validator.validate_project_name(new_name, exclude_id=item_id)
+                if not is_valid:
+                    messagebox.showerror("Validation Error", error_msg)
                     return
 
                 self.db_manager.execute_update(
@@ -2191,12 +2326,10 @@ class ProjectSessionTab:
                 )
 
             elif item_type == 'session':
-                # Check for duplicate names
-                existing = self.db_manager.execute_query(
-                    "SELECT id FROM sessions WHERE name = ? AND id != ?", (new_name, item_id)
-                )
-                if existing:
-                    messagebox.showerror("Error", f"Session '{new_name}' already exists")
+                # Enhanced validation
+                is_valid, error_msg = self.validator.validate_session_name(new_name, exclude_id=item_id)
+                if not is_valid:
+                    messagebox.showerror("Validation Error", error_msg)
                     return
 
                 # Note: Sessions don't have description field in current schema
@@ -2604,21 +2737,16 @@ class ProjectSessionTab:
             messagebox.showerror("Database Error", f"Failed to load sessions for combo: {e}")
 
     def new_project(self):
-        """Create a new project"""
+        """Create a new project with enhanced validation"""
         name = simpledialog.askstring("New Project", "Enter project name:")
         if not name:
             return
 
-        # Check for duplicate names
-        try:
-            existing = self.db_manager.execute_query(
-                "SELECT id FROM projects WHERE name = ?", (name.strip(),)
-            )
-            if existing:
-                messagebox.showerror("Error", f"Project '{name}' already exists")
-                return
-        except Exception:
-            pass
+        # Enhanced validation
+        is_valid, error_msg = self.validator.validate_project_name(name)
+        if not is_valid:
+            messagebox.showerror("Validation Error", error_msg)
+            return
 
         description = simpledialog.askstring("New Project", "Enter project description (optional):")
 
@@ -2628,21 +2756,19 @@ class ProjectSessionTab:
                 (name.strip(), description.strip() if description else '')
             )
             self.refresh_tree()
-            messagebox.showinfo("Success", f"Project '{name}' created successfully")
+            messagebox.showinfo("Success", f"Project '{name.strip()}' created successfully")
 
         except Exception as e:
             messagebox.showerror("Database Error", f"Failed to create project: {e}")
 
     def new_session(self):
-        """Create a new session"""
+        """Create a new session with enhanced validation"""
         # First get available projects
         try:
             projects = self.db_manager.execute_query('SELECT id, name FROM projects ORDER BY name')
             if not projects:
                 messagebox.showwarning("Warning", "No projects available. Create a project first.")
                 return
-
-            project_options = [f"{project[1]} (ID: {project[0]})" for project in projects]
 
             # Simple dialog for project selection
             project_name = simpledialog.askstring(
@@ -2668,23 +2794,18 @@ class ProjectSessionTab:
             if not session_name:
                 return
 
-            # Check for duplicate session names
-            try:
-                existing = self.db_manager.execute_query(
-                    "SELECT id FROM sessions WHERE name = ?", (session_name.strip(),)
-                )
-                if existing:
-                    messagebox.showerror("Error", f"Session '{session_name}' already exists")
-                    return
-            except Exception:
-                pass
+            # Enhanced validation
+            is_valid, error_msg = self.validator.validate_session_name(session_name, project_id)
+            if not is_valid:
+                messagebox.showerror("Validation Error", error_msg)
+                return
 
             self.db_manager.execute_update(
                 "INSERT INTO sessions (project_id, name) VALUES (?, ?)",
                 (project_id, session_name.strip())
             )
             self.refresh_tree()
-            messagebox.showinfo("Success", f"Session '{session_name}' created successfully")
+            messagebox.showinfo("Success", f"Session '{session_name.strip()}' created successfully")
 
         except Exception as e:
             messagebox.showerror("Database Error", f"Failed to create session: {e}")
@@ -2831,6 +2952,81 @@ class ProjectSessionTab:
         except Exception as e:
             messagebox.showerror("Database Error", f"Failed to unassign agents: {e}")
 
+    def on_drag_start(self, event):
+        """Handle start of drag operation"""
+        item = self.project_tree.identify_row(event.y)
+        if item:
+            item_values = self.project_tree.item(item).get('values', [])
+            # Only allow dragging agents
+            if len(item_values) >= 2 and item_values[0] == 'agent':
+                self.drag_data["item"] = item
+                self.drag_data["x"] = event.x
+                self.drag_data["y"] = event.y
+                # Change cursor to indicate dragging
+                self.project_tree.config(cursor="hand2")
+
+    def on_drag_motion(self, event):
+        """Handle drag motion"""
+        if self.drag_data["item"]:
+            # Update cursor position
+            self.drag_data["x"] = event.x
+            self.drag_data["y"] = event.y
+
+    def on_drag_release(self, event):
+        """Handle end of drag operation"""
+        if self.drag_data["item"]:
+            # Reset cursor
+            self.project_tree.config(cursor="")
+
+            # Get target item
+            target_item = self.project_tree.identify_row(event.y)
+            if target_item and target_item != self.drag_data["item"]:
+                target_values = self.project_tree.item(target_item).get('values', [])
+
+                # Can only drop on sessions
+                if len(target_values) >= 2 and target_values[0] == 'session':
+                    source_values = self.project_tree.item(self.drag_data["item"]).get('values', [])
+                    if len(source_values) >= 2:
+                        agent_id = source_values[1]
+                        target_session_id = target_values[1]
+
+                        # Confirm the move
+                        agent_text = self.project_tree.item(self.drag_data["item"])['text']
+                        session_text = self.project_tree.item(target_item)['text']
+
+                        if messagebox.askyesno("Confirm Move",
+                            f"Move {agent_text} to {session_text}?"):
+                            self.move_agent_to_session(agent_id, target_session_id)
+
+            # Reset drag data
+            self.drag_data = {"item": None, "x": 0, "y": 0}
+
+    def move_agent_to_session(self, agent_id, session_id):
+        """Move an agent to a different session"""
+        try:
+            # Check if agent exists and get current assignment
+            current_assignment = self.db_manager.execute_query(
+                "SELECT session_id FROM agents WHERE agent_id = ?", (agent_id,)
+            )
+
+            if not current_assignment:
+                messagebox.showerror("Error", f"Agent '{agent_id}' not found")
+                return
+
+            # Update agent's session assignment
+            self.db_manager.execute_update(
+                "UPDATE agents SET session_id = ? WHERE agent_id = ?",
+                (session_id, agent_id)
+            )
+
+            # Refresh the tree to show the change
+            self.refresh_tree()
+
+            messagebox.showinfo("Success", f"Agent '{agent_id}' moved to new session")
+
+        except Exception as e:
+            messagebox.showerror("Database Error", f"Failed to move agent: {e}")
+
 class RedesignedComprehensiveGUI:
     """Main GUI class implementing all specifications"""
 
@@ -2850,6 +3046,9 @@ class RedesignedComprehensiveGUI:
 
         # Start status monitoring
         self.status_monitor.start_monitoring()
+
+        # Setup cleanup on close
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def create_main_interface(self):
         """Create the main interface"""
@@ -2906,13 +3105,43 @@ class RedesignedComprehensiveGUI:
         if hasattr(self, 'status_bar'):
             self.status_bar.update_status(status_data)
 
+    def on_closing(self):
+        """Clean up resources when closing the application"""
+        try:
+            # Stop status monitoring
+            if hasattr(self, 'status_monitor'):
+                self.status_monitor.stop_monitoring()
+
+            # Close database connection pool
+            if hasattr(self, 'db_manager'):
+                self.db_manager.close_pool()
+
+            # Destroy the root window
+            self.root.destroy()
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+            # Force close
+            try:
+                self.root.destroy()
+            except:
+                pass
+
     def run(self):
-        """Start the GUI"""
+        """Start the GUI with improved error recovery"""
         try:
             self.root.mainloop()
+        except Exception as e:
+            print(f"GUI application error: {e}")
+            messagebox.showerror("Application Error", f"An unexpected error occurred: {e}")
         finally:
-            # Stop monitoring when GUI closes
-            self.status_monitor.stop_monitoring()
+            # Ensure cleanup happens
+            try:
+                if hasattr(self, 'status_monitor'):
+                    self.status_monitor.stop_monitoring()
+                if hasattr(self, 'db_manager'):
+                    self.db_manager.close_pool()
+            except Exception as e:
+                print(f"Error during cleanup: {e}")
 
 def main():
     """Main entry point"""

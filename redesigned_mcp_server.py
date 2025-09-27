@@ -144,8 +144,31 @@ class DatabaseManager:
                 VALUES (1, 1, 'Default Session')
             ''')
 
+            # Create indexes for better performance
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_agents_agent_id ON agents(agent_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_agents_session_id ON agents(session_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_agents_permission_level ON agents(permission_level)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_agents_teams ON agents(teams)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_agents_is_active ON agents(is_active)')
+
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_agent_id ON contexts(agent_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_project ON contexts(project)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_session ON contexts(session)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_timestamp ON contexts(timestamp)')
+
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_connections_connection_id ON connections(connection_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_connections_assigned_agent_id ON connections(assigned_agent_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_connections_status ON connections(status)')
+
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sessions_project_id ON sessions(project_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name)')
+
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name)')
+
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_teams_team_id ON teams(team_id)')
+
             conn.commit()
-            logger.info("Database schema created successfully")
+            logger.info("Database schema and indexes created successfully")
 
     @staticmethod
     def update_schema():
@@ -193,6 +216,29 @@ class DatabaseManager:
                 if 'project' not in context_columns:
                     cursor.execute("ALTER TABLE contexts ADD COLUMN project TEXT")
                     logger.info("Added project column to contexts")
+
+            # Ensure indexes exist (idempotent operation)
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_agents_agent_id ON agents(agent_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_agents_session_id ON agents(session_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_agents_permission_level ON agents(permission_level)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_agents_teams ON agents(teams)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_agents_is_active ON agents(is_active)')
+
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_agent_id ON contexts(agent_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_project ON contexts(project)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_session ON contexts(session)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_timestamp ON contexts(timestamp)')
+
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_connections_connection_id ON connections(connection_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_connections_assigned_agent_id ON connections(assigned_agent_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_connections_status ON connections(status)')
+
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sessions_project_id ON sessions(project_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name)')
+
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name)')
+
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_teams_team_id ON teams(team_id)')
 
             conn.commit()
 
