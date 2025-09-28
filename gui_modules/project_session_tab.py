@@ -150,15 +150,24 @@ class ProjectSessionTab:
         sort_combo.pack(side=tk.LEFT)
         sort_combo.bind('<<ComboboxSelected>>', lambda e: self.refresh_tree())
 
-        # Control buttons
+        # Control buttons - Two rows
         btn_frame = ttk.Frame(left_frame)
         btn_frame.pack(fill=tk.X, pady=5)
 
-        ttk.Button(btn_frame, text="➕ New Project", command=self.new_project).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="➕ New Session", command=self.new_session).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="✏️ Rename", command=self.rename_selected).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="🔄 Refresh", command=self.refresh_tree).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="🗑️ Delete", command=self.delete_selected).pack(side=tk.RIGHT, padx=2)
+        # First row: New Project, New Session, Rename
+        btn_row1 = ttk.Frame(btn_frame)
+        btn_row1.pack(fill=tk.X, pady=(0, 2))
+
+        ttk.Button(btn_row1, text="➕ New Project", command=self.new_project).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_row1, text="➕ New Session", command=self.new_session).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_row1, text="✏️ Rename", command=self.rename_selected).pack(side=tk.LEFT, padx=2)
+
+        # Second row: Refresh, Delete
+        btn_row2 = ttk.Frame(btn_frame)
+        btn_row2.pack(fill=tk.X)
+
+        ttk.Button(btn_row2, text="🔄 Refresh", command=self.refresh_tree).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_row2, text="🗑️ Delete", command=self.delete_selected).pack(side=tk.LEFT, padx=2)
 
         # Right panel - Details and assignment
         right_frame = ttk.LabelFrame(main_container, text="Details & Management", padding=10)

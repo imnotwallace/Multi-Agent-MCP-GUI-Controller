@@ -95,7 +95,7 @@ class DatabaseManager:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     agent_id TEXT UNIQUE NOT NULL,
                     name TEXT,
-                    permission_level TEXT DEFAULT 'team' CHECK (permission_level IN ('all', 'team', 'self')),
+                    permission_level TEXT DEFAULT 'team' CHECK (permission_level IN ('project', 'session', 'team', 'self')),
                     teams TEXT,  -- JSON array of team IDs
                     connection_id TEXT UNIQUE,
                     session_id INTEGER,
@@ -280,8 +280,45 @@ class PermissionManager:
     @staticmethod
     def get_agent_session(agent_id: str) -> Optional[str]:
         """Get current session for agent based on project/session context"""
-        # For now, return a default session - this can be enhanced later
-        return "Default Session"
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT session_id FROM agents WHERE agent_id = ?",
+                (agent_id,)
+            )
+            result = cursor.fetchone()
+            return str(result[0]) if result and result[0] else None
+
+    @staticmethod
+    def get_agent_project(agent_id: str) -> Optional[str]:
+        """Get current project for agent based on session"""
+        session_id = PermissionManager.get_agent_session(agent_id)
+        if not session_id:
+            return None
+
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT project_id FROM sessions WHERE id = ?",
+                (session_id,)
+            )
+            result = cursor.fetchone()
+            return str(result[0]) if result and result[0] else None
+
+    @staticmethod
+    def get_context_project(context_agent: str, context_session: str) -> Optional[str]:
+        """Get project for a context based on session"""
+        if not context_session:
+            return None
+
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT project_id FROM sessions WHERE id = ?",
+                (context_session,)
+            )
+            result = cursor.fetchone()
+            return str(result[0]) if result and result[0] else None
 
     @staticmethod
     def can_read_context(requesting_agent: str, context_agent: str, context_session: str) -> bool:
@@ -289,9 +326,14 @@ class PermissionManager:
         permission = PermissionManager.get_agent_permission(requesting_agent)
         requesting_session = PermissionManager.get_agent_session(requesting_agent)
 
-        if permission == 'all':
-            # All can see all contexts in the same session
+        if permission == 'session':
+            # Session can see all contexts in the same session
             return context_session == requesting_session
+        elif permission == 'project':
+            # Project can see all contexts in the same project
+            requesting_project = PermissionManager.get_agent_project(requesting_agent)
+            context_project = PermissionManager.get_context_project(context_agent, context_session)
+            return context_project == requesting_project
         elif permission == 'team':
             # Team can see contexts from agents in the same team(s) within the same session
             if context_session != requesting_session:
@@ -526,8 +568,18 @@ class MCPServer:
         with sqlite3.connect(DB_PATH) as conn:
             cursor = conn.cursor()
 
-            if permission == 'all':
-                # All can read all contexts in the session
+            if permission == 'project':
+                # Project can read all contexts in the project
+                agent_project = PermissionManager.get_agent_project(agent_id)
+                cursor.execute('''
+                    SELECT c.context_id, c.agent_id, c.context, c.timestamp
+                    FROM contexts c
+                    JOIN sessions s ON c.session = s.id
+                    WHERE s.project_id = ?
+                    ORDER BY c.timestamp DESC
+                ''', (agent_project,))
+            elif permission == 'session':
+                # Session can read all contexts in the session
                 cursor.execute('''
                     SELECT context_id, agent_id, context, timestamp
                     FROM contexts

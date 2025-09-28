@@ -92,13 +92,15 @@ Process Flow:
 3. Server checks connection's assigned agent permissions
 4. Server returns contexts according to permission level:
    - self: Returns only contexts created by the requesting agent
-   - team: Returns contexts from agents in the same team
-   - all: Returns all contexts in the current session
+   - team: Returns contexts from agents in the same team within session
+   - session: Returns all contexts in the current session
+   - project: Returns all contexts in the current project
 
 Permission Levels:
 - self: Maximum security, agent isolation
-- team: Team collaboration
-- all: Full session access
+- team: Team collaboration within session
+- session: Full session access
+- project: Full project access across all sessions
 
 IMPORTANT: The response format has been simplified. The server now only returns:
 - "contexts" array on success (even if empty)

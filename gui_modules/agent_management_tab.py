@@ -662,7 +662,7 @@ class AgentCreateDialog:
         permission_combo = ttk.Combobox(
             self.dialog,
             textvariable=self.permission_var,
-            values=["all", "team", "self"],
+            values=["project", "session", "team", "self"],
             state="readonly",
             width=22
         )
@@ -746,7 +746,7 @@ class PermissionChangeDialog:
         permission_combo = ttk.Combobox(
             self.dialog,
             textvariable=self.permission_var,
-            values=["all", "team", "self"],
+            values=["project", "session", "team", "self"],
             state="readonly",
             width=18,
             font=('Arial', 14)

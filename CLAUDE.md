@@ -15,7 +15,7 @@ python run_redesigned_system.py
 
 # Alternative: Start components separately
 python redesigned_mcp_server.py
-python redesigned_comprehensive_gui.py
+python redesigned_comprehensive_gui_hub.py
 ```
 
 ### Testing
@@ -44,24 +44,23 @@ This is a Multi-Agent MCP (Model Context Protocol) Context Manager with three ma
 
 ### Core Files
 - **`redesigned_mcp_server.py`** - Main MCP server with WebSocket endpoints and REST API
-- **`redesigned_comprehensive_gui.py`** - 5-tab GUI for management (Projects, Sessions, Agents, Connections, Contexts)
+- **`redesigned_comprehensive_gui_hub.py`** - 5-tab GUI hub that imports modular components (Projects, Sessions, Agents, Connections, Contexts)
 - **`run_redesigned_system.py`** - Unified startup script with optional GUI launch
 
 ### Database Schema
 The system uses SQLite with these key tables:
 - **projects** - Top-level organization units
 - **sessions** - Sub-units within projects
-- **agents** - Registered agents with permission levels (full/team/self)
+- **agents** - Registered agents with permission levels (project/session/team/self)
 - **connections** - Active WebSocket connections
 - **contexts** - Stored context data with timestamps
 - **teams** - Team definitions for collaboration
 
 ### Permission System
 Four-tier permission model:
-
-- **project**: Access to all contexts within the project
-- **session**: Access to all contexts in the session
-- **team**: Access to contexts from agents in same team(s) as at the time of writing the context within session
+- **project**: Access to all contexts within the entire project
+- **session**: Access to all contexts in the session (formerly "full")
+- **team**: Access to contexts from agents in same team(s) within session
 - **self**: Access only to own contexts within session
 
 ### MCP Communication Protocol
