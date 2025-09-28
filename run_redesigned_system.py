@@ -11,8 +11,8 @@ import threading
 import time
 
 def start_server():
-    """Start the redesigned MCP server"""
-    print("Starting Redesigned MCP Server...")
+    """Start the Multi-Agent MCP Server"""
+    print("Starting Multi-Agent MCP Server...")
     try:
         subprocess.run([sys.executable, "redesigned_mcp_server.py"], check=True)
     except KeyboardInterrupt:
@@ -21,10 +21,10 @@ def start_server():
         print(f"Server error: {e}")
 
 def start_gui():
-    """Start the redesigned comprehensive GUI"""
-    print("Starting Redesigned Comprehensive GUI...")
+    """Start the  Multi-Agent MCP Server GUI"""
+    print("Starting Multi-Agent MCP Server GUI...")
     try:
-        subprocess.run([sys.executable, "redesigned_comprehensive_gui.py"], check=True)
+        subprocess.run([sys.executable, "redesigned_comprehensive_gui_hub.py"], check=True)
     except KeyboardInterrupt:
         print("GUI stopped by user")
     except Exception as e:
@@ -35,7 +35,7 @@ def main():
     launch_gui = os.environ.get('LAUNCH_GUI', 'false').lower() == 'true'
 
     if launch_gui:
-        print("=== Multi-Agent MCP Context Manager (Redesigned) ===")
+        print("=== Multi-Agent MCP Context Manager===")
         print("Starting server + GUI mode...")
 
         # Start server in background thread
@@ -48,7 +48,7 @@ def main():
         # Start GUI in main thread
         start_gui()
     else:
-        print("=== Multi-Agent MCP Context Manager Server (Redesigned) ===")
+        print("=== Multi-Agent MCP Context Manager Server===")
         print("Starting server only mode...")
         start_server()
 

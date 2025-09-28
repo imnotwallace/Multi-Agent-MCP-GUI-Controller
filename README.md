@@ -20,9 +20,9 @@ This system provides a complete Multi-Agent MCP Context Manager with:
 ### **MCP Server** (`redesigned_mcp_server.py`)
 - **Enhanced database schema** - supports teams, projects, sessions, and agents
 - **Advanced permission system** with three levels:
-  - `admin`: Full access to all contexts in the session
-  - `user`: Access to contexts from agents in the same team(s) within the session
-  - `guest`: Access only to own contexts within the session
+  - `full`: Full access to all contexts in the session
+  - `team`: Access to contexts from agents in the same team(s) within the session
+  - `self`: Access only to own contexts within the session
 - **Team-based access control** - JSON-stored team memberships for collaboration
 - **Auto connection registration** - automatic registration and management of connections
 - **Comprehensive REST API** - full endpoints for connection and agent management
