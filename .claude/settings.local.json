@@ -24,7 +24,8 @@
       "Bash(del \"multi-agent_mcp_context_manager.db\")",
       "Bash(timeout:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(del test_sqlite_vec.py simple_sqlite_vec_test.py)"
     ],
     "deny": [],
     "ask": []

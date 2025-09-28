@@ -32,7 +32,7 @@ def start_gui():
 
 def main():
     """Main entry point"""
-    launch_gui = os.environ.get('LAUNCH_GUI', 'false').lower() == 'true'
+    launch_gui = os.environ.get('LAUNCH_GUI', 'true').lower() == 'true'
 
     if launch_gui:
         print("=== Multi-Agent MCP Context Manager===")

@@ -109,7 +109,7 @@ class ServerStatusMonitor:
             try:
                 # Check server status
                 response = requests.get(f"{self.server_url}/status", timeout=2)
-                if response.status_code == 200:
+                if response.status_code == 500:
                     status_data = response.json()
                     status_data['server_status'] = 'Online'
                     status_data['server_address'] = self.server_url

@@ -556,7 +556,7 @@ class ViewChunksWindow:
 
     def add_chunk(self):
         """Add a new chunk to the context"""
-        dialog = AddChunkDialog(self.window, 1150)  # 1150 character limit as per instructions
+        dialog = AddChunkDialog(self.window, 4025)  # 4025 character limit as per instructions
         new_content = dialog.show()
 
         if new_content:
@@ -606,7 +606,7 @@ class ViewChunksWindow:
 
             if result:
                 current_content = result[0][0]
-                dialog = EditChunkDialog(self.window, current_content, 1150)
+                dialog = EditChunkDialog(self.window, current_content, 4025)
                 new_content = dialog.show()
 
                 if new_content is not None:

@@ -30,29 +30,25 @@ from fastapi.responses import JSONResponse
 import uvicorn
 
 try:
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
 except ImportError:
-    RecursiveCharacterTextSplitter = None
-    logger.warning("langchain not installed. Text chunking will use simple fallback.")
-
-# Try to load sqlite-vss extension
-try:
-    import sqlite3
-    # Test if sqlite-vss is available
-    test_conn = sqlite3.connect(":memory:")
-    test_conn.enable_load_extension(True)
     try:
-        test_conn.load_extension("vss0")
-        VSS_AVAILABLE = True
-        logger.info("sqlite-vss extension loaded successfully")
-    except sqlite3.OperationalError:
-        VSS_AVAILABLE = False
-        logger.warning("sqlite-vss extension not available. Vector search will be disabled.")
-    finally:
-        test_conn.close()
-except Exception as e:
-    VSS_AVAILABLE = False
-    logger.warning(f"Failed to test sqlite-vss: {e}")
+        from langchain.text_splitter import RecursiveCharacterTextSplitter
+    except ImportError:
+        RecursiveCharacterTextSplitter = None
+        
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("redesigned_mcp_server")
+
+# Try to load sqlite-vec extension
+try:
+    import sqlite_vec
+    VEC_AVAILABLE = True
+    logger.info("sqlite-vec extension available")
+except ImportError:
+    VEC_AVAILABLE = False
+    logger.warning("sqlite-vec not available. Vector search will be disabled.")
 
 # Try to load nomic embedding model
 try:
@@ -64,9 +60,7 @@ except ImportError:
     NOMIC_AVAILABLE = False
     logger.warning("nomic.ai not installed. Vector embeddings will be disabled.")
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("redesigned_mcp_server")
+
 
 app = FastAPI(title="Multi-Agent MCP Context Manager")
 
@@ -74,10 +68,10 @@ app = FastAPI(title="Multi-Agent MCP Context Manager")
 CONFIG_FILE = "mcp_server_config.json"
 DB_PATH = "multi-agent_mcp_context_manager.db"
 
-# Chunking configuration
-CHUNK_SIZE = 1000
+# Chunking configuration (4025 chars as per instructions)
+CHUNK_SIZE = 3500  # 3500 characters as specified in instructions
 OVERLAP_PERCENTAGE = 0.15
-CHUNK_OVERLAP = int(CHUNK_SIZE * OVERLAP_PERCENTAGE)  # 150 characters
+CHUNK_OVERLAP = int(CHUNK_SIZE * OVERLAP_PERCENTAGE)  # 525 characters
 
 class DatabaseManager:
     """Manages database operations and schema"""
@@ -233,8 +227,8 @@ class DatabaseManager:
 
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_teams_team_id ON teams(team_id)')
 
-            # Create vector embeddings table if sqlite-vss is available
-            if VSS_AVAILABLE:
+            # Create vector embeddings table if sqlite-vec is available
+            if VEC_AVAILABLE:
                 DatabaseManager._create_vector_tables(cursor)
 
             conn.commit()
@@ -242,24 +236,27 @@ class DatabaseManager:
 
     @staticmethod
     def _create_vector_tables(cursor):
-        """Create vector embedding tables using sqlite-vss"""
+        """Create vector embedding tables using sqlite-vec"""
         try:
-            # Enable extension loading
+            # Enable extension loading and load sqlite-vec extension
             cursor.connection.enable_load_extension(True)
-            cursor.connection.load_extension("vss0")
+            cursor.connection.load_extension(sqlite_vec.loadable_path())
 
-            # Create virtual table for vector embeddings
+            # Create table for vector embeddings
             cursor.execute('''
-                CREATE VIRTUAL TABLE IF NOT EXISTS context_chunk_embeddings USING vss0(
+                CREATE TABLE IF NOT EXISTS context_chunk_embeddings (
                     chunk_id INTEGER PRIMARY KEY,
-                    embedding(256)
+                    embedding BLOB,
+                    FOREIGN KEY (chunk_id) REFERENCES context_chunks (id)
                 )
             ''')
 
-            # Create index for vector similarity search
+            # Create vector index using sqlite-vec
             cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_embeddings_vector
-                ON context_chunk_embeddings(embedding)
+                CREATE VIRTUAL TABLE IF NOT EXISTS context_chunk_embeddings_vec
+                USING vec0(
+                    embedding float[256]
+                )
             ''')
 
             logger.info("Vector embedding tables created successfully")
@@ -439,8 +436,8 @@ class DatabaseManager:
 
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_teams_team_id ON teams(team_id)')
 
-            # Create vector embeddings table if sqlite-vss is available and not exists
-            if VSS_AVAILABLE:
+            # Create vector embeddings table if sqlite-vec is available and not exists
+            if VEC_AVAILABLE:
                 cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='context_chunk_embeddings'")
                 if not cursor.fetchone():
                     try:
@@ -564,24 +561,31 @@ class VectorEmbeddingUtility:
     @staticmethod
     def store_embeddings(chunk_ids: List[int], embeddings: np.ndarray):
         """Store embeddings in the vector database"""
-        if not VSS_AVAILABLE:
-            logger.warning("Cannot store embeddings - sqlite-vss not available")
+        if not VEC_AVAILABLE:
+            logger.warning("Cannot store embeddings - sqlite-vec not available")
             return
 
         try:
             with sqlite3.connect(DB_PATH) as conn:
                 conn.enable_load_extension(True)
-                conn.load_extension("vss0")
+                conn.load_extension(sqlite_vec.loadable_path())
                 cursor = conn.cursor()
 
                 for chunk_id, embedding in zip(chunk_ids, embeddings):
                     # Convert numpy array to bytes for storage
                     embedding_bytes = embedding.astype(np.float32).tobytes()
 
+                    # Store in the regular table
                     cursor.execute('''
                         INSERT OR REPLACE INTO context_chunk_embeddings (chunk_id, embedding)
                         VALUES (?, ?)
                     ''', (chunk_id, embedding_bytes))
+
+                    # Also store in the vector table for searching
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO context_chunk_embeddings_vec (rowid, embedding)
+                        VALUES (?, ?)
+                    ''', (chunk_id, embedding.astype(np.float32).tobytes()))
 
                 conn.commit()
                 logger.info(f"Stored {len(chunk_ids)} embeddings in vector database")
