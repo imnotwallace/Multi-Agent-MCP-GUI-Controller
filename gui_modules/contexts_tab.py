@@ -45,6 +45,7 @@ class ContextsTab:
         row1.pack(fill=tk.X, pady=(0, 5))
 
         ttk.Button(row1, text="👁️ View Context", command=self.view_context).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(row1, text="🧩 View Chunks", command=self.view_chunks).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(row1, text="✏️ Edit Context", command=self.edit_context).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(row1, text="🗑️ Delete Selected", command=self.delete_contexts).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(row1, text="🔄 Refresh", command=self.refresh_contexts).pack(side=tk.RIGHT)
@@ -72,7 +73,7 @@ class ContextsTab:
         grid_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
         # Contexts tree
-        columns = ('timestamp', 'project_session', 'agent_id', 'context_snippet')
+        columns = ('timestamp', 'project_session', 'agent_id', 'chunk_count', 'context_summary')
         self.contexts_tree = ttk.Treeview(
             grid_frame,
             columns=columns,
@@ -85,14 +86,16 @@ class ContextsTab:
         self.contexts_tree.heading('timestamp', text='Timestamp')
         self.contexts_tree.heading('project_session', text='Project → Session')
         self.contexts_tree.heading('agent_id', text='Agent ID')
-        self.contexts_tree.heading('context_snippet', text='Context (first 100 chars)')
+        self.contexts_tree.heading('chunk_count', text='No. of Chunks')
+        self.contexts_tree.heading('context_summary', text='Context Summary')
 
         # Set column widths
         self.contexts_tree.column('#0', width=50)
         self.contexts_tree.column('timestamp', width=150)
         self.contexts_tree.column('project_session', width=200)
         self.contexts_tree.column('agent_id', width=120)
-        self.contexts_tree.column('context_snippet', width=300)
+        self.contexts_tree.column('chunk_count', width=80)
+        self.contexts_tree.column('context_summary', width=300)
 
         # Make columns sortable
         for col in columns:
@@ -123,30 +126,35 @@ class ContextsTab:
 
         try:
             contexts = self.db_manager.execute_query('''
-                SELECT context_id, timestamp, project, session, agent_id, context
-                FROM contexts
-                ORDER BY timestamp DESC
+                SELECT c.id, c.created_at, p.name as project_name, s.name as session_name, c.agent_id,
+                       (SELECT COUNT(*) FROM context_chunks cc WHERE cc.context_id = c.id) as chunk_count,
+                       (SELECT substr(cc.chunk_content, 1, 100) FROM context_chunks cc
+                        WHERE cc.context_id = c.id ORDER BY cc.chunk_index LIMIT 1) as context_summary
+                FROM contexts c
+                LEFT JOIN projects p ON c.project_id = p.id
+                LEFT JOIN sessions s ON c.session_id = s.id
+                ORDER BY c.created_at DESC
             ''')
 
             for context in contexts:
-                context_id, timestamp, project, session, agent_id, full_context = context
+                context_id, timestamp, project_name, session_name, agent_id, chunk_count, context_summary = context
 
-                # Create snippet
-                context_snippet = full_context[:100] + "..." if len(full_context) > 100 else full_context
-                project_session = f"{project or 'Unknown'} → {session or 'Unknown'}"
+                # Format display values
+                project_session = f"{project_name or 'Unknown'} → {session_name or 'Unknown'}"
+                summary = (context_summary or "")[:100] + ("..." if context_summary and len(context_summary) > 100 else "")
 
                 self.contexts_tree.insert(
                     '',
                     'end',
                     text=str(context_id),
-                    values=(timestamp, project_session, agent_id, context_snippet)
+                    values=(timestamp, project_session, agent_id, chunk_count or 0, summary)
                 )
 
         except Exception as e:
             messagebox.showerror("Database Error", f"Failed to load contexts: {e}")
 
     def view_context(self):
-        """View full context in popup"""
+        """View full context (all chunks combined) in popup"""
         selection = self.contexts_tree.selection()
         if not selection:
             messagebox.showwarning("Warning", "Please select a context to view")
@@ -154,16 +162,49 @@ class ContextsTab:
 
         context_id = self.contexts_tree.item(selection[0])['text']
         try:
+            # Get context metadata
             result = self.db_manager.execute_query(
-                "SELECT context, agent_id, timestamp FROM contexts WHERE context_id = ?",
+                "SELECT agent_id, created_at FROM contexts WHERE id = ?",
                 (context_id,)
             )
 
             if result:
-                context, agent_id, timestamp = result[0]
-                ViewContextDialog(self.frame, context_id, context, agent_id, timestamp)
+                agent_id, timestamp = result[0]
+
+                # Get all chunks for this context
+                chunks = self.db_manager.execute_query('''
+                    SELECT chunk_content FROM context_chunks
+                    WHERE context_id = ?
+                    ORDER BY chunk_index
+                ''', (context_id,))
+
+                # Combine all chunks
+                full_context = '\n'.join([chunk[0] for chunk in chunks])
+
+                ViewContextDialog(self.frame, context_id, full_context, agent_id, timestamp)
         except Exception as e:
             messagebox.showerror("Database Error", f"Failed to load context: {e}")
+
+    def view_chunks(self):
+        """View chunks for selected context in new window"""
+        selection = self.contexts_tree.selection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select a context to view chunks")
+            return
+
+        context_id = self.contexts_tree.item(selection[0])['text']
+        try:
+            # Get context metadata
+            result = self.db_manager.execute_query(
+                "SELECT agent_id, created_at FROM contexts WHERE id = ?",
+                (context_id,)
+            )
+
+            if result:
+                agent_id, timestamp = result[0]
+                ViewChunksWindow(self.frame, context_id, agent_id, timestamp, self.db_manager)
+        except Exception as e:
+            messagebox.showerror("Database Error", f"Failed to load context chunks: {e}")
 
     def edit_context(self):
         """Edit context in popup"""
@@ -207,8 +248,13 @@ class ContextsTab:
         if messagebox.askyesno("Confirm Deletion", f"Delete {count} context(s)?"):
             try:
                 for context_id in context_ids:
+                    # Delete chunks first due to foreign key constraint
                     self.db_manager.execute_update(
-                        "DELETE FROM contexts WHERE context_id = ?", (context_id,)
+                        "DELETE FROM context_chunks WHERE context_id = ?", (context_id,)
+                    )
+                    # Delete the context metadata
+                    self.db_manager.execute_update(
+                        "DELETE FROM contexts WHERE id = ?", (context_id,)
                     )
 
                 self.refresh_contexts()
@@ -252,24 +298,30 @@ class ContextsTab:
 
         try:
             contexts = self.db_manager.execute_query('''
-                SELECT context_id, timestamp, project, session, agent_id, context
-                FROM contexts
-                WHERE LOWER(agent_id) LIKE ? OR LOWER(context) LIKE ?
-                ORDER BY timestamp DESC
+                SELECT c.id, c.created_at, p.name as project_name, s.name as session_name, c.agent_id,
+                       (SELECT COUNT(*) FROM context_chunks cc WHERE cc.context_id = c.id) as chunk_count,
+                       (SELECT substr(cc.chunk_content, 1, 100) FROM context_chunks cc
+                        WHERE cc.context_id = c.id ORDER BY cc.chunk_index LIMIT 1) as context_summary
+                FROM contexts c
+                LEFT JOIN projects p ON c.project_id = p.id
+                LEFT JOIN sessions s ON c.session_id = s.id
+                WHERE LOWER(c.agent_id) LIKE ? OR
+                      EXISTS (SELECT 1 FROM context_chunks cc WHERE cc.context_id = c.id AND LOWER(cc.chunk_content) LIKE ?)
+                ORDER BY c.created_at DESC
             ''', (f'%{search_text}%', f'%{search_text}%'))
 
             for context in contexts:
-                context_id, timestamp, project, session, agent_id, full_context = context
+                context_id, timestamp, project_name, session_name, agent_id, chunk_count, context_summary = context
 
-                # Create snippet
-                context_snippet = full_context[:100] + "..." if len(full_context) > 100 else full_context
-                project_session = f"{project or 'Unknown'} → {session or 'Unknown'}"
+                # Format display values
+                project_session = f"{project_name or 'Unknown'} → {session_name or 'Unknown'}"
+                summary = (context_summary or "")[:100] + ("..." if context_summary and len(context_summary) > 100 else "")
 
                 self.contexts_tree.insert(
                     '',
                     'end',
                     text=str(context_id),
-                    values=(timestamp, project_session, agent_id, context_snippet)
+                    values=(timestamp, project_session, agent_id, chunk_count or 0, summary)
                 )
 
         except Exception as e:
@@ -383,6 +435,387 @@ class EditContextDialog:
     def on_save(self):
         """Handle save button"""
         self.result = self.text_widget.get('1.0', tk.END).strip()
+        self.dialog.destroy()
+
+    def on_cancel(self):
+        """Handle cancel button"""
+        self.dialog.destroy()
+
+
+class ViewChunksWindow:
+    """Window for viewing and managing chunks for a specific context"""
+
+    def __init__(self, parent, context_id, agent_id, timestamp, db_manager):
+        self.parent = parent
+        self.context_id = context_id
+        self.agent_id = agent_id
+        self.timestamp = timestamp
+        self.db_manager = db_manager
+
+        self.window = tk.Toplevel(parent)
+        self.window.title(f"View Chunks - Context {context_id}")
+        self.window.geometry("1000x700")
+        self.window.transient(parent)
+
+        self.create_widgets()
+        self.refresh_chunks()
+
+    def create_widgets(self):
+        """Create widgets for chunks window"""
+        # Info frame
+        info_frame = ttk.Frame(self.window)
+        info_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        ttk.Label(info_frame, text=f"Context ID: {self.context_id}").pack(anchor=tk.W)
+        ttk.Label(info_frame, text=f"Agent ID: {self.agent_id}").pack(anchor=tk.W)
+        ttk.Label(info_frame, text=f"Timestamp: {self.timestamp}").pack(anchor=tk.W)
+
+        # Buttons frame
+        button_frame = ttk.Frame(self.window)
+        button_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+        ttk.Button(button_frame, text="➕ Add Chunk", command=self.add_chunk).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="✏️ Edit Chunk", command=self.edit_chunk).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="🗑️ Delete Chunk", command=self.delete_chunk).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(button_frame, text="🔄 Refresh", command=self.refresh_chunks).pack(side=tk.RIGHT)
+
+        # Chunks grid
+        grid_frame = ttk.Frame(self.window)
+        grid_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        # Chunks tree
+        columns = ('chunk_index', 'content_preview', 'character_count', 'created_at')
+        self.chunks_tree = ttk.Treeview(
+            grid_frame,
+            columns=columns,
+            show='tree headings',
+            selectmode='extended'
+        )
+
+        # Configure columns
+        self.chunks_tree.heading('#0', text='ID')
+        self.chunks_tree.heading('chunk_index', text='Index')
+        self.chunks_tree.heading('content_preview', text='Content Preview')
+        self.chunks_tree.heading('character_count', text='Chars')
+        self.chunks_tree.heading('created_at', text='Created')
+
+        # Set column widths
+        self.chunks_tree.column('#0', width=50)
+        self.chunks_tree.column('chunk_index', width=60)
+        self.chunks_tree.column('content_preview', width=500)
+        self.chunks_tree.column('character_count', width=80)
+        self.chunks_tree.column('created_at', width=150)
+
+        # Add scrollbars
+        v_scrollbar = ttk.Scrollbar(grid_frame, orient=tk.VERTICAL, command=self.chunks_tree.yview)
+        h_scrollbar = ttk.Scrollbar(grid_frame, orient=tk.HORIZONTAL, command=self.chunks_tree.xview)
+        self.chunks_tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+
+        # Pack grid and scrollbars
+        self.chunks_tree.grid(row=0, column=0, sticky='nsew')
+        v_scrollbar.grid(row=0, column=1, sticky='ns')
+        h_scrollbar.grid(row=1, column=0, sticky='ew')
+
+        # Configure grid weights
+        grid_frame.grid_rowconfigure(0, weight=1)
+        grid_frame.grid_columnconfigure(0, weight=1)
+
+        # Close button
+        ttk.Button(self.window, text="Close", command=self.window.destroy).pack(pady=10)
+
+    def refresh_chunks(self):
+        """Refresh chunks display"""
+        # Clear existing items
+        for item in self.chunks_tree.get_children():
+            self.chunks_tree.delete(item)
+
+        try:
+            chunks = self.db_manager.execute_query('''
+                SELECT id, chunk_index, chunk_content, created_at
+                FROM context_chunks
+                WHERE context_id = ?
+                ORDER BY chunk_index
+            ''', (self.context_id,))
+
+            for chunk in chunks:
+                chunk_id, chunk_index, chunk_content, created_at = chunk
+
+                # Create preview (first 100 chars)
+                content_preview = chunk_content[:100] + ("..." if len(chunk_content) > 100 else "")
+                character_count = len(chunk_content)
+
+                self.chunks_tree.insert(
+                    '',
+                    'end',
+                    text=str(chunk_id),
+                    values=(chunk_index, content_preview, character_count, created_at)
+                )
+
+        except Exception as e:
+            messagebox.showerror("Database Error", f"Failed to load chunks: {e}")
+
+    def add_chunk(self):
+        """Add a new chunk to the context"""
+        dialog = AddChunkDialog(self.window, 1150)  # 1150 character limit as per instructions
+        new_content = dialog.show()
+
+        if new_content:
+            try:
+                # Get the next chunk index
+                result = self.db_manager.execute_query(
+                    "SELECT COALESCE(MAX(chunk_index), -1) + 1 FROM context_chunks WHERE context_id = ?",
+                    (self.context_id,)
+                )
+                next_index = result[0][0] if result else 0
+
+                # Get session and project IDs from context
+                context_info = self.db_manager.execute_query(
+                    "SELECT session_id, project_id FROM contexts WHERE id = ?",
+                    (self.context_id,)
+                )
+
+                if context_info:
+                    session_id, project_id = context_info[0]
+
+                    # Insert new chunk
+                    self.db_manager.execute_update('''
+                        INSERT INTO context_chunks
+                        (context_id, chunk_index, chunk_content, agent_id, session_id, project_id)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    ''', (self.context_id, next_index, new_content, self.agent_id, session_id, project_id))
+
+                    self.refresh_chunks()
+                    messagebox.showinfo("Success", "Chunk added successfully")
+
+            except Exception as e:
+                messagebox.showerror("Database Error", f"Failed to add chunk: {e}")
+
+    def edit_chunk(self):
+        """Edit selected chunk"""
+        selection = self.chunks_tree.selection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select a chunk to edit")
+            return
+
+        chunk_id = self.chunks_tree.item(selection[0])['text']
+        try:
+            result = self.db_manager.execute_query(
+                "SELECT chunk_content FROM context_chunks WHERE id = ?",
+                (chunk_id,)
+            )
+
+            if result:
+                current_content = result[0][0]
+                dialog = EditChunkDialog(self.window, current_content, 1150)
+                new_content = dialog.show()
+
+                if new_content is not None:
+                    self.db_manager.execute_update(
+                        "UPDATE context_chunks SET chunk_content = ? WHERE id = ?",
+                        (new_content, chunk_id)
+                    )
+                    self.refresh_chunks()
+                    messagebox.showinfo("Success", "Chunk updated successfully")
+
+        except Exception as e:
+            messagebox.showerror("Database Error", f"Failed to edit chunk: {e}")
+
+    def delete_chunk(self):
+        """Delete selected chunk"""
+        selection = self.chunks_tree.selection()
+        if not selection:
+            messagebox.showwarning("Warning", "Please select a chunk to delete")
+            return
+
+        chunk_id = self.chunks_tree.item(selection[0])['text']
+
+        if messagebox.askyesno("Confirm Deletion", "Delete selected chunk?"):
+            try:
+                self.db_manager.execute_update(
+                    "DELETE FROM context_chunks WHERE id = ?", (chunk_id,)
+                )
+                self.refresh_chunks()
+                messagebox.showinfo("Success", "Chunk deleted successfully")
+
+            except Exception as e:
+                messagebox.showerror("Database Error", f"Failed to delete chunk: {e}")
+
+
+class AddChunkDialog:
+    """Dialog for adding a new chunk"""
+
+    def __init__(self, parent, char_limit):
+        self.parent = parent
+        self.char_limit = char_limit
+        self.result = None
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("Add New Chunk")
+        self.dialog.geometry("800x500")
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        self.create_widgets()
+
+    def create_widgets(self):
+        """Create widgets for dialog"""
+        # Instructions
+        ttk.Label(
+            self.dialog,
+            text=f"Enter chunk content (max {self.char_limit} characters):",
+            font=("Arial", 10, "bold")
+        ).pack(anchor=tk.W, padx=10, pady=(10, 5))
+
+        # Character counter
+        self.char_count_var = tk.StringVar()
+        self.char_count_label = ttk.Label(self.dialog, textvariable=self.char_count_var)
+        self.char_count_label.pack(anchor=tk.W, padx=10)
+
+        # Text editor
+        text_frame = ttk.Frame(self.dialog)
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(5, 10))
+
+        self.text_widget = tk.Text(text_frame, wrap=tk.WORD)
+        scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self.text_widget.yview)
+        self.text_widget.configure(yscrollcommand=scrollbar.set)
+
+        self.text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Bind text change event
+        self.text_widget.bind('<KeyRelease>', self.update_char_count)
+        self.text_widget.bind('<Button-1>', self.update_char_count)
+
+        # Buttons
+        button_frame = ttk.Frame(self.dialog)
+        button_frame.pack(pady=10)
+
+        ttk.Button(button_frame, text="Save", command=self.on_save).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=self.on_cancel).pack(side=tk.LEFT, padx=5)
+
+        # Initial character count
+        self.update_char_count()
+
+    def update_char_count(self, event=None):
+        """Update character count display"""
+        content = self.text_widget.get('1.0', tk.END).rstrip('\n')
+        char_count = len(content)
+        self.char_count_var.set(f"Characters: {char_count}/{self.char_limit}")
+
+        # Color code based on limit
+        if char_count > self.char_limit:
+            self.char_count_label.configure(foreground='red')
+        elif char_count > self.char_limit * 0.9:
+            self.char_count_label.configure(foreground='orange')
+        else:
+            self.char_count_label.configure(foreground='green')
+
+    def show(self):
+        """Show dialog and return result"""
+        self.parent.wait_window(self.dialog)
+        return self.result
+
+    def on_save(self):
+        """Handle save button"""
+        content = self.text_widget.get('1.0', tk.END).strip()
+        if len(content) > self.char_limit:
+            messagebox.showerror("Error", f"Content exceeds {self.char_limit} character limit")
+            return
+        if not content:
+            messagebox.showerror("Error", "Content cannot be empty")
+            return
+
+        self.result = content
+        self.dialog.destroy()
+
+    def on_cancel(self):
+        """Handle cancel button"""
+        self.dialog.destroy()
+
+
+class EditChunkDialog:
+    """Dialog for editing an existing chunk"""
+
+    def __init__(self, parent, current_content, char_limit):
+        self.parent = parent
+        self.char_limit = char_limit
+        self.result = None
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("Edit Chunk")
+        self.dialog.geometry("800x500")
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+
+        self.create_widgets(current_content)
+
+    def create_widgets(self, current_content):
+        """Create widgets for dialog"""
+        # Instructions
+        ttk.Label(
+            self.dialog,
+            text=f"Edit chunk content (max {self.char_limit} characters):",
+            font=("Arial", 10, "bold")
+        ).pack(anchor=tk.W, padx=10, pady=(10, 5))
+
+        # Character counter
+        self.char_count_var = tk.StringVar()
+        self.char_count_label = ttk.Label(self.dialog, textvariable=self.char_count_var)
+        self.char_count_label.pack(anchor=tk.W, padx=10)
+
+        # Text editor
+        text_frame = ttk.Frame(self.dialog)
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(5, 10))
+
+        self.text_widget = tk.Text(text_frame, wrap=tk.WORD)
+        scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self.text_widget.yview)
+        self.text_widget.configure(yscrollcommand=scrollbar.set)
+
+        self.text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Insert current content
+        self.text_widget.insert('1.0', current_content)
+
+        # Bind text change event
+        self.text_widget.bind('<KeyRelease>', self.update_char_count)
+        self.text_widget.bind('<Button-1>', self.update_char_count)
+
+        # Buttons
+        button_frame = ttk.Frame(self.dialog)
+        button_frame.pack(pady=10)
+
+        ttk.Button(button_frame, text="Save", command=self.on_save).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=self.on_cancel).pack(side=tk.LEFT, padx=5)
+
+        # Initial character count
+        self.update_char_count()
+
+    def update_char_count(self, event=None):
+        """Update character count display"""
+        content = self.text_widget.get('1.0', tk.END).rstrip('\n')
+        char_count = len(content)
+        self.char_count_var.set(f"Characters: {char_count}/{self.char_limit}")
+
+        # Color code based on limit
+        if char_count > self.char_limit:
+            self.char_count_label.configure(foreground='red')
+        elif char_count > self.char_limit * 0.9:
+            self.char_count_label.configure(foreground='orange')
+        else:
+            self.char_count_label.configure(foreground='green')
+
+    def show(self):
+        """Show dialog and return result"""
+        self.parent.wait_window(self.dialog)
+        return self.result
+
+    def on_save(self):
+        """Handle save button"""
+        content = self.text_widget.get('1.0', tk.END).strip()
+        if len(content) > self.char_limit:
+            messagebox.showerror("Error", f"Content exceeds {self.char_limit} character limit")
+            return
+
+        self.result = content
         self.dialog.destroy()
 
     def on_cancel(self):

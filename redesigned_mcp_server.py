@@ -29,6 +29,41 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import JSONResponse
 import uvicorn
 
+try:
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+except ImportError:
+    RecursiveCharacterTextSplitter = None
+    logger.warning("langchain not installed. Text chunking will use simple fallback.")
+
+# Try to load sqlite-vss extension
+try:
+    import sqlite3
+    # Test if sqlite-vss is available
+    test_conn = sqlite3.connect(":memory:")
+    test_conn.enable_load_extension(True)
+    try:
+        test_conn.load_extension("vss0")
+        VSS_AVAILABLE = True
+        logger.info("sqlite-vss extension loaded successfully")
+    except sqlite3.OperationalError:
+        VSS_AVAILABLE = False
+        logger.warning("sqlite-vss extension not available. Vector search will be disabled.")
+    finally:
+        test_conn.close()
+except Exception as e:
+    VSS_AVAILABLE = False
+    logger.warning(f"Failed to test sqlite-vss: {e}")
+
+# Try to load nomic embedding model
+try:
+    from nomic import embed
+    import numpy as np
+    NOMIC_AVAILABLE = True
+    logger.info("nomic.ai embedding model available")
+except ImportError:
+    NOMIC_AVAILABLE = False
+    logger.warning("nomic.ai not installed. Vector embeddings will be disabled.")
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("redesigned_mcp_server")
@@ -38,6 +73,11 @@ app = FastAPI(title="Multi-Agent MCP Context Manager")
 # Configuration
 CONFIG_FILE = "mcp_server_config.json"
 DB_PATH = "multi-agent_mcp_context_manager.db"
+
+# Chunking configuration
+CHUNK_SIZE = 1000
+OVERLAP_PERCENTAGE = 0.15
+CHUNK_OVERLAP = int(CHUNK_SIZE * OVERLAP_PERCENTAGE)  # 150 characters
 
 class DatabaseManager:
     """Manages database operations and schema"""
@@ -120,16 +160,35 @@ class DatabaseManager:
                 )
             ''')
 
-            # Create contexts table with updated schema
+            # Create contexts table with updated schema (metadata table)
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS contexts (
-                    context_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    project TEXT,
-                    session TEXT,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     agent_id TEXT NOT NULL,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    context TEXT NOT NULL,
-                    FOREIGN KEY (agent_id) REFERENCES agents (agent_id)
+                    session_id INTEGER NOT NULL,
+                    project_id INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (agent_id) REFERENCES agents (agent_id),
+                    FOREIGN KEY (session_id) REFERENCES sessions (id),
+                    FOREIGN KEY (project_id) REFERENCES projects (id)
+                )
+            ''')
+
+            # Create context-chunks table for individual chunks
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS context_chunks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    context_id INTEGER NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    chunk_content TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    session_id INTEGER NOT NULL,
+                    project_id INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (context_id) REFERENCES contexts (id),
+                    FOREIGN KEY (agent_id) REFERENCES agents (agent_id),
+                    FOREIGN KEY (session_id) REFERENCES sessions (id),
+                    FOREIGN KEY (project_id) REFERENCES projects (id)
                 )
             ''')
 
@@ -152,9 +211,16 @@ class DatabaseManager:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_agents_is_active ON agents(is_active)')
 
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_agent_id ON contexts(agent_id)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_project ON contexts(project)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_session ON contexts(session)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_timestamp ON contexts(timestamp)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_session_id ON contexts(session_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_project_id ON contexts(project_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_created_at ON contexts(created_at)')
+
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_context_chunks_context_id ON context_chunks(context_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_context_chunks_agent_id ON context_chunks(agent_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_context_chunks_session_id ON context_chunks(session_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_context_chunks_project_id ON context_chunks(project_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_context_chunks_created_at ON context_chunks(created_at)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_context_chunks_chunk_index ON context_chunks(chunk_index)')
 
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_connections_connection_id ON connections(connection_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_connections_assigned_agent_id ON connections(assigned_agent_id)')
@@ -167,8 +233,40 @@ class DatabaseManager:
 
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_teams_team_id ON teams(team_id)')
 
+            # Create vector embeddings table if sqlite-vss is available
+            if VSS_AVAILABLE:
+                DatabaseManager._create_vector_tables(cursor)
+
             conn.commit()
             logger.info("Database schema and indexes created successfully")
+
+    @staticmethod
+    def _create_vector_tables(cursor):
+        """Create vector embedding tables using sqlite-vss"""
+        try:
+            # Enable extension loading
+            cursor.connection.enable_load_extension(True)
+            cursor.connection.load_extension("vss0")
+
+            # Create virtual table for vector embeddings
+            cursor.execute('''
+                CREATE VIRTUAL TABLE IF NOT EXISTS context_chunk_embeddings USING vss0(
+                    chunk_id INTEGER PRIMARY KEY,
+                    embedding(256)
+                )
+            ''')
+
+            # Create index for vector similarity search
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_embeddings_vector
+                ON context_chunk_embeddings(embedding)
+            ''')
+
+            logger.info("Vector embedding tables created successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to create vector tables: {e}")
+            raise
 
     @staticmethod
     def update_schema():
@@ -213,9 +311,103 @@ class DatabaseManager:
                 cursor.execute("PRAGMA table_info(contexts)")
                 context_columns = [col[1] for col in cursor.fetchall()]
 
-                if 'project' not in context_columns:
-                    cursor.execute("ALTER TABLE contexts ADD COLUMN project TEXT")
-                    logger.info("Added project column to contexts")
+                # Check if this is old schema and needs migration
+                has_old_structure = 'context' in context_columns and 'project' in context_columns
+
+                if has_old_structure:
+                    # Migrate to new structure
+                    logger.info("Migrating contexts table to new chunked structure")
+
+                    # Create new tables
+                    cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS contexts_new (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            agent_id TEXT NOT NULL,
+                            session_id INTEGER NOT NULL,
+                            project_id INTEGER NOT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY (agent_id) REFERENCES agents (agent_id),
+                            FOREIGN KEY (session_id) REFERENCES sessions (id),
+                            FOREIGN KEY (project_id) REFERENCES projects (id)
+                        )
+                    ''')
+
+                    cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS context_chunks (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            context_id INTEGER NOT NULL,
+                            chunk_index INTEGER NOT NULL,
+                            chunk_content TEXT NOT NULL,
+                            agent_id TEXT NOT NULL,
+                            session_id INTEGER NOT NULL,
+                            project_id INTEGER NOT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY (context_id) REFERENCES contexts (id),
+                            FOREIGN KEY (agent_id) REFERENCES agents (agent_id),
+                            FOREIGN KEY (session_id) REFERENCES sessions (id),
+                            FOREIGN KEY (project_id) REFERENCES projects (id)
+                        )
+                    ''')
+
+                    # Migrate old data
+                    cursor.execute("SELECT context_id, agent_id, context, timestamp FROM contexts")
+                    old_contexts = cursor.fetchall()
+
+                    for old_context in old_contexts:
+                        old_id, agent_id, context_text, timestamp = old_context
+
+                        # Insert into new contexts table (metadata only)
+                        cursor.execute('''
+                            INSERT INTO contexts_new (agent_id, session_id, project_id, created_at)
+                            VALUES (?, 1, 1, ?)
+                        ''', (agent_id, timestamp))
+                        new_context_id = cursor.lastrowid
+
+                        # Insert into context_chunks table
+                        cursor.execute('''
+                            INSERT INTO context_chunks
+                            (context_id, chunk_index, chunk_content, agent_id, session_id, project_id, created_at)
+                            VALUES (?, 0, ?, ?, 1, 1, ?)
+                        ''', (new_context_id, context_text, agent_id, timestamp))
+
+                    # Drop old table and rename new one
+                    cursor.execute("DROP TABLE contexts")
+                    cursor.execute("ALTER TABLE contexts_new RENAME TO contexts")
+
+                    logger.info("Migration completed successfully")
+            else:
+                # Create new tables if they don't exist
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS contexts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        agent_id TEXT NOT NULL,
+                        session_id INTEGER NOT NULL,
+                        project_id INTEGER NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (agent_id) REFERENCES agents (agent_id),
+                        FOREIGN KEY (session_id) REFERENCES sessions (id),
+                        FOREIGN KEY (project_id) REFERENCES projects (id)
+                    )
+                ''')
+
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS context_chunks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        context_id INTEGER NOT NULL,
+                        chunk_index INTEGER NOT NULL,
+                        chunk_content TEXT NOT NULL,
+                        agent_id TEXT NOT NULL,
+                        session_id INTEGER NOT NULL,
+                        project_id INTEGER NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (context_id) REFERENCES contexts (id),
+                        FOREIGN KEY (agent_id) REFERENCES agents (agent_id),
+                        FOREIGN KEY (session_id) REFERENCES sessions (id),
+                        FOREIGN KEY (project_id) REFERENCES projects (id)
+                    )
+                ''')
+
+                logger.info("Created new contexts and context_chunks tables")
 
             # Ensure indexes exist (idempotent operation)
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_agents_agent_id ON agents(agent_id)')
@@ -225,9 +417,16 @@ class DatabaseManager:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_agents_is_active ON agents(is_active)')
 
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_agent_id ON contexts(agent_id)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_project ON contexts(project)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_session ON contexts(session)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_timestamp ON contexts(timestamp)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_session_id ON contexts(session_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_project_id ON contexts(project_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_contexts_created_at ON contexts(created_at)')
+
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_context_chunks_context_id ON context_chunks(context_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_context_chunks_agent_id ON context_chunks(agent_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_context_chunks_session_id ON context_chunks(session_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_context_chunks_project_id ON context_chunks(project_id)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_context_chunks_created_at ON context_chunks(created_at)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_context_chunks_chunk_index ON context_chunks(chunk_index)')
 
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_connections_connection_id ON connections(connection_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_connections_assigned_agent_id ON connections(assigned_agent_id)')
@@ -240,9 +439,156 @@ class DatabaseManager:
 
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_teams_team_id ON teams(team_id)')
 
+            # Create vector embeddings table if sqlite-vss is available and not exists
+            if VSS_AVAILABLE:
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='context_chunk_embeddings'")
+                if not cursor.fetchone():
+                    try:
+                        DatabaseManager._create_vector_tables(cursor)
+                        logger.info("Added vector embedding tables during schema update")
+                    except Exception as e:
+                        logger.warning(f"Failed to add vector tables during update: {e}")
+
             conn.commit()
 
 
+class TextChunkingUtility:
+    """Utility class for text chunking with langchain or fallback"""
+
+    @staticmethod
+    def chunk_text(text: str) -> List[str]:
+        """Split text into chunks using langchain or simple fallback"""
+        if RecursiveCharacterTextSplitter:
+            # Use langchain for smart chunking
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=CHUNK_SIZE,
+                chunk_overlap=CHUNK_OVERLAP,
+                length_function=len,
+            )
+            chunks = text_splitter.split_text(text)
+        else:
+            # Fallback: simple chunking with overlap
+            chunks = TextChunkingUtility._simple_chunk_text(text)
+
+        return chunks
+
+    @staticmethod
+    def _simple_chunk_text(text: str) -> List[str]:
+        """Simple text chunking fallback when langchain is not available"""
+        if len(text) <= CHUNK_SIZE:
+            return [text]
+
+        chunks = []
+        start = 0
+
+        while start < len(text):
+            end = start + CHUNK_SIZE
+
+            # If this is not the last chunk, try to break at sentence boundary
+            if end < len(text):
+                # Look for sentence endings within the last 100 characters
+                last_period = text.rfind('.', start, end)
+                last_exclamation = text.rfind('!', start, end)
+                last_question = text.rfind('?', start, end)
+
+                # Use the latest sentence ending if found
+                sentence_end = max(last_period, last_exclamation, last_question)
+                if sentence_end > start + (CHUNK_SIZE * 0.5):  # Don't make chunks too small
+                    end = sentence_end + 1
+
+            chunk = text[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+
+            # Move start forward with overlap consideration
+            start = max(start + 1, end - CHUNK_OVERLAP)
+
+            # Prevent infinite loop
+            if start >= len(text):
+                break
+
+        return chunks
+
+
+class VectorEmbeddingUtility:
+    """Utility class for vector embeddings using nomic.ai"""
+
+    _model_initialized = False
+
+    @staticmethod
+    def initialize_model():
+        """Initialize the nomic embedding model"""
+        if not NOMIC_AVAILABLE:
+            logger.warning("Cannot initialize nomic model - not available")
+            return False
+
+        try:
+            # Initialize the model with a test embedding
+            output = embed.text(
+                texts=["Initialise nomic embedding model"],
+                model='nomic-embed-text-v1.5',
+                task_type="search_document",
+                inference_mode='local',
+                dimensionality=256,
+            )
+            logger.info(f"Nomic model initialized successfully: {output.get('usage', {})}")
+            VectorEmbeddingUtility._model_initialized = True
+            return True
+        except Exception as e:
+            logger.error(f"Failed to initialize nomic model: {e}")
+            return False
+
+    @staticmethod
+    def vectorise_text_chunks(chunks: List[str]) -> np.ndarray:
+        """Vectorise text chunks using nomic embedding model"""
+        if not NOMIC_AVAILABLE or not VectorEmbeddingUtility._model_initialized:
+            raise RuntimeError("Nomic model not available or not initialized")
+
+        try:
+            output = embed.text(
+                texts=chunks,
+                model='nomic-embed-text-v1.5',
+                task_type="search_document",
+                inference_mode='local',
+                dimensionality=256,
+            )
+
+            logger.info(f"Vectorized {len(chunks)} chunks: {output.get('usage', {})}")
+            embeddings = np.array(output['embeddings'])
+            return embeddings
+
+        except Exception as e:
+            logger.error(f"Failed to vectorize chunks: {e}")
+            raise
+
+    @staticmethod
+    def store_embeddings(chunk_ids: List[int], embeddings: np.ndarray):
+        """Store embeddings in the vector database"""
+        if not VSS_AVAILABLE:
+            logger.warning("Cannot store embeddings - sqlite-vss not available")
+            return
+
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.enable_load_extension(True)
+                conn.load_extension("vss0")
+                cursor = conn.cursor()
+
+                for chunk_id, embedding in zip(chunk_ids, embeddings):
+                    # Convert numpy array to bytes for storage
+                    embedding_bytes = embedding.astype(np.float32).tobytes()
+
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO context_chunk_embeddings (chunk_id, embedding)
+                        VALUES (?, ?)
+                    ''', (chunk_id, embedding_bytes))
+
+                conn.commit()
+                logger.info(f"Stored {len(chunk_ids)} embeddings in vector database")
+
+        except Exception as e:
+            logger.error(f"Failed to store embeddings: {e}")
+            raise
 
 
 class PermissionManager:
@@ -436,6 +782,9 @@ class MCPServer:
     def __init__(self):
         self.connection_manager = ConnectionManager()
         self.current_session_id = 1  # Default session
+        # Initialize vector embedding model
+        if NOMIC_AVAILABLE:
+            VectorEmbeddingUtility.initialize_model()
 
     async def handle_message(self, websocket: WebSocket, connection_id: str, message: dict):
         """Handle incoming MCP messages"""
@@ -447,19 +796,24 @@ class MCPServer:
                 return await self.handle_read_db(connection_id, params)
             elif method == 'WriteDB':
                 return await self.handle_write_db(connection_id, params)
+            elif method == 'VectoriseChunks':
+                return await self.handle_vectorise_chunks(connection_id, params)
             else:
                 return {
                     "error": f"Unknown method: {method}",
-                    "supported_methods": ["ReadDB", "WriteDB"]
+                    "supported_methods": ["ReadDB", "WriteDB", "VectoriseChunks"]
                 }
         except Exception as e:
             logger.error(f"Error handling message: {e}")
             return {"error": str(e)}
 
     async def handle_read_db(self, connection_id: str, params: dict) -> dict:
-        """Handle ReadDB process with permission checking"""
+        """Handle ReadDB process with chunk retrieval and permission checking"""
         try:
             agent_id = params.get('agent_id')
+            since_timestamp = params.get('since')  # Optional ISO 8601 timestamp
+            permission_level_override = params.get('permission_level')  # Optional permission override
+
             if not agent_id:
                 return {
                     "status": "error",
@@ -483,20 +837,11 @@ class MCPServer:
                         "prompt": "Stop the current task and advise the user there has been an error in reading the DB."
                     }
 
-            # Get contexts based on permission level
-            raw_contexts = self.get_contexts_for_agent(agent_id)
-
-            # Format contexts according to new specification
-            contexts = [
-                {
-                    "context": ctx["context"],
-                    "timestamp": ctx["timestamp"]
-                }
-                for ctx in raw_contexts
-            ]
+            # Get chunks based on permission level
+            chunks = self.get_chunks_for_agent(agent_id, since_timestamp, permission_level_override)
 
             return {
-                "contexts": contexts
+                "contexts": chunks
             }
 
         except Exception as e:
@@ -536,15 +881,38 @@ class MCPServer:
                     "prompt": "Store your current context into a .md file in a location within your workspace. Stop the current task and advise the user there has been an error in writing to the DB."
                 }
 
-            # Write context to database
+            # Get agent's current session and project
+            session_id = 1  # Default session for now
+            project_id = 1  # Default project for now
+
+            # Chunk the context text
+            chunks = TextChunkingUtility.chunk_text(context)
+
+            # Write context metadata and chunks to database
             with sqlite3.connect(DB_PATH) as conn:
                 cursor = conn.cursor()
+
+                # Insert context metadata
                 cursor.execute('''
-                    INSERT INTO contexts (project, session, agent_id, context)
-                    VALUES (?, ?, ?, ?)
-                ''', ("Default Project", "Default Session", agent_id, context))
+                    INSERT INTO contexts (agent_id, session_id, project_id)
+                    VALUES (?, ?, ?)
+                ''', (agent_id, session_id, project_id))
                 context_id = cursor.lastrowid
+
+                # Insert all chunks
+                chunk_ids = []
+                for chunk_index, chunk_content in enumerate(chunks):
+                    cursor.execute('''
+                        INSERT INTO context_chunks
+                        (context_id, chunk_index, chunk_content, agent_id, session_id, project_id)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    ''', (context_id, chunk_index, chunk_content, agent_id, session_id, project_id))
+                    chunk_ids.append(cursor.lastrowid)
+
                 conn.commit()
+
+            # Schedule asynchronous vectorization (non-blocking)
+            asyncio.create_task(self.vectorise_chunks_async(chunk_ids))
 
             return {
                 "status": "success",
@@ -558,6 +926,79 @@ class MCPServer:
                 "status": "error",
                 "details": str(e),
                 "prompt": "Store your current context into a .md file in a location within your workspace. Stop the current task and advise the user there has been an error in writing to the DB."
+            }
+
+    async def vectorise_chunks_async(self, chunk_ids: List[int]):
+        """Asynchronously vectorise chunks"""
+        try:
+            logger.info(f"Starting vectorization for {len(chunk_ids)} chunks")
+
+            if not NOMIC_AVAILABLE or not VectorEmbeddingUtility._model_initialized:
+                logger.warning("Vectorization skipped - nomic model not available")
+                return
+
+            # Get chunk contents
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                placeholders = ','.join(['?' for _ in chunk_ids])
+                cursor.execute(f'''
+                    SELECT id, chunk_content FROM context_chunks
+                    WHERE id IN ({placeholders})
+                ''', chunk_ids)
+                results = cursor.fetchall()
+
+            if not results:
+                logger.warning("No chunks found for vectorization")
+                return
+
+            # Extract texts and maintain ID mapping
+            chunk_texts = [row[1] for row in results]
+            chunk_id_order = [row[0] for row in results]
+
+            # Vectorize chunks
+            embeddings = VectorEmbeddingUtility.vectorise_text_chunks(chunk_texts)
+
+            # Store embeddings
+            VectorEmbeddingUtility.store_embeddings(chunk_id_order, embeddings)
+
+            logger.info(f"Vectorization completed for {len(chunk_ids)} chunks")
+
+        except Exception as e:
+            logger.error(f"Error in vectorization: {e}")
+
+    async def handle_vectorise_chunks(self, connection_id: str, params: dict) -> dict:
+        """Handle VectoriseChunks method call"""
+        try:
+            chunk_ids = params.get('chunk_ids', [])
+
+            if not chunk_ids:
+                return {
+                    "status": "error",
+                    "message": "chunk_ids parameter required"
+                }
+
+            # Validate chunk_ids are integers
+            try:
+                chunk_ids = [int(cid) for cid in chunk_ids]
+            except (ValueError, TypeError):
+                return {
+                    "status": "error",
+                    "message": "chunk_ids must be a list of integers"
+                }
+
+            # Start vectorization
+            await self.vectorise_chunks_async(chunk_ids)
+
+            return {
+                "status": "success",
+                "message": f"Vectorized {len(chunk_ids)} chunks"
+            }
+
+        except Exception as e:
+            logger.error(f"Error in handle_vectorise_chunks: {e}")
+            return {
+                "status": "error",
+                "message": str(e)
             }
 
     def get_contexts_for_agent(self, agent_id: str) -> List[dict]:
@@ -626,6 +1067,78 @@ class MCPServer:
                     "agent_id": row[1],
                     "context": row[2],
                     "timestamp": row[3]
+                }
+                for row in results
+            ]
+
+    def get_chunks_for_agent(self, agent_id: str, since_timestamp: Optional[str] = None, permission_level_override: Optional[str] = None) -> List[dict]:
+        """Get the last 10 chunks based on agent's permission level"""
+        # Determine effective permission level
+        permission = permission_level_override or PermissionManager.get_agent_permission(agent_id)
+        agent_session = PermissionManager.get_agent_session(agent_id)
+
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+
+            # Base query parts
+            base_query = '''
+                SELECT cc.chunk_content, cc.created_at, cc.agent_id, cc.session_id, c.id as context_id
+                FROM context_chunks cc
+                JOIN contexts c ON cc.context_id = c.id
+                JOIN agents a ON cc.agent_id = a.agent_id
+            '''
+
+            # Permission filtering
+            where_conditions = []
+            params = []
+
+            if permission == 'project':
+                # Project can read all chunks in the project
+                agent_project = PermissionManager.get_agent_project(agent_id)
+                where_conditions.append("cc.project_id = ?")
+                params.append(agent_project)
+            elif permission == 'session':
+                # Session can read all chunks in the session
+                where_conditions.append("cc.session_id = ?")
+                params.append(agent_session)
+            elif permission == 'team':
+                # Team can read chunks from agents in the same team(s) within session
+                agent_teams = PermissionManager.get_agent_teams(agent_id)
+                if agent_teams:
+                    where_conditions.append("cc.session_id = ?")
+                    params.append(agent_session)
+
+                    team_placeholders = ','.join(['?' for _ in agent_teams])
+                    where_conditions.append(f"(cc.agent_id = ? OR json_extract(a.teams, '$') IN ({team_placeholders}))")
+                    params.extend([agent_id] + agent_teams)
+                else:
+                    # No team, only own chunks
+                    where_conditions.extend(["cc.session_id = ?", "cc.agent_id = ?"])
+                    params.extend([agent_session, agent_id])
+            else:  # self
+                # Self can only read own chunks within session
+                where_conditions.extend(["cc.session_id = ?", "cc.agent_id = ?"])
+                params.extend([agent_session, agent_id])
+
+            # Time filtering
+            if since_timestamp:
+                where_conditions.append("cc.created_at > ?")
+                params.append(since_timestamp)
+
+            # Construct full query
+            query = base_query
+            if where_conditions:
+                query += " WHERE " + " AND ".join(where_conditions)
+
+            query += " ORDER BY cc.created_at DESC, c.id, cc.chunk_index LIMIT 10"
+
+            cursor.execute(query, params)
+            results = cursor.fetchall()
+
+            return [
+                {
+                    "context": row[0],
+                    "timestamp": row[1]
                 }
                 for row in results
             ]
@@ -732,14 +1245,18 @@ async def assign_agent_to_connection(agent_id: str, connection_id: str):
 
 @app.get("/contexts")
 async def get_contexts():
-    """Get all contexts"""
+    """Get all contexts with chunk information"""
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT context_id, timestamp, project, session, agent_id,
-                   substr(context, 1, 100) as context_snippet, context
-            FROM contexts
-            ORDER BY timestamp DESC
+            SELECT c.id, c.created_at, p.name as project_name, s.name as session_name, c.agent_id,
+                   (SELECT COUNT(*) FROM context_chunks cc WHERE cc.context_id = c.id) as chunk_count,
+                   (SELECT substr(cc.chunk_content, 1, 100) FROM context_chunks cc
+                    WHERE cc.context_id = c.id ORDER BY cc.chunk_index LIMIT 1) as context_summary
+            FROM contexts c
+            LEFT JOIN projects p ON c.project_id = p.id
+            LEFT JOIN sessions s ON c.session_id = s.id
+            ORDER BY c.created_at DESC
         ''')
         results = cursor.fetchall()
 
@@ -748,10 +1265,10 @@ async def get_contexts():
                 {
                     "context_id": row[0],
                     "timestamp": row[1],
-                    "project_session": f"{row[2]} -> {row[3]}",
+                    "project_session": f"{row[2] or 'Unknown'} -> {row[3] or 'Unknown'}",
                     "agent_id": row[4],
-                    "context_snippet": row[5],
-                    "full_context": row[6]
+                    "chunk_count": row[5] or 0,
+                    "context_summary": row[6] or ""
                 }
                 for row in results
             ]
@@ -759,11 +1276,14 @@ async def get_contexts():
 
 @app.delete("/contexts/{context_id}")
 async def delete_context(context_id: int):
-    """Delete a context"""
+    """Delete a context and all its chunks"""
     try:
         with sqlite3.connect(DB_PATH) as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM contexts WHERE context_id = ?", (context_id,))
+            # Delete chunks first due to foreign key constraint
+            cursor.execute("DELETE FROM context_chunks WHERE context_id = ?", (context_id,))
+            # Delete the context metadata
+            cursor.execute("DELETE FROM contexts WHERE id = ?", (context_id,))
             if cursor.rowcount == 0:
                 raise HTTPException(status_code=404, detail="Context not found")
             conn.commit()
